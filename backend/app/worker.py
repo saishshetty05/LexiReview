@@ -5,6 +5,7 @@ from celery import Celery
 
 celery_app = Celery("lexireview", broker=os.environ.get("REDIS_URL", "redis://redis:6379/0"),
                     backend=os.environ.get("REDIS_URL", "redis://redis:6379/0"))
+celery_app.conf.broker_connection_retry_on_startup = True
 
 
 @celery_app.task(name="ping")
