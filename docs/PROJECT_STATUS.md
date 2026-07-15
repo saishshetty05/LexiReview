@@ -46,8 +46,9 @@ Decisions the humans must make (Claude: help draft, do not decide for them):
 - Boundary behaviors: (a) API response shape while a job is running (polling); (b) how unverified findings are stored and rendered.
 
 ## 7. Immediately after Step 7 (Step 8 — lanes split, parallel work begins)
-- A: RLS spike (backend/spikes/rls_spike.py proving Row-Level Security with SET LOCAL app.user_id through a pooled SQLAlchemy connection; PASS/FAIL output; result closes the placeholder decision-log row). Then schema migrations (Alembic), auth, upload endpoint wired to preflight.py.
-- B: Celery job plumbing (pass-by-ID, states per the new contract, retries/backoff, DLQ), then extraction (pypdf/python-docx) in per-job random temp dirs purged in finally, then [BLOCK_n] anchors, then the LLM client STUB (provider-agnostic, refuses un-pseudonymised or non-synthetic payloads — no real key needed yet).
+- A1: RLS spike (backend/spikes/rls_spike.py proving Row-Level Security with SET LOCAL app.user_id through a pooled SQLAlchemy connection; PASS/FAIL output; result closes the placeholder decision-log row). Then schema migrations (Alembic), auth, upload endpoint wired to preflight.py.
+- B1: Celery job plumbing (pass-by-ID, states per the contract, retries/backoff, DLQ) — DONE (backend/app/models.py, jobs.py, worker.py; b/job-plumbing). Note: analysis_jobs exists only as a SQLAlchemy model, tested against SQLite — no Alembic migration yet, since migrations are A's lane; the table isn't in the real Postgres DB until that migration lands.
+- B2: extraction (pypdf/python-docx) in per-job random temp dirs purged in finally, then [BLOCK_n] anchors, then the LLM client STUB (provider-agnostic, refuses un-pseudonymised or non-synthetic payloads — no real key needed yet).
 
 ## 8. How to keep this file useful
 Update PROJECT_STATUS.md in the same PR whenever a step closes or an open item resolves. It is the orientation file for any fresh Claude session; stale status is worse than no status.
