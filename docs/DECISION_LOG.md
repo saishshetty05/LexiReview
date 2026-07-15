@@ -5,7 +5,7 @@ Historical decisions (rounds 1–5 of PRD cross-validation) live in the PRD v2.4
 
 | Date | Decision | Rationale | Who |
 |------|----------|-----------|-----|
-| YYYY-MM-DD | RLS + connection pooler: <result of week-1 spike> | PRD SEC-2 requires validation | A |
+| 2026-07-15 | RLS + connection pooler: spike PASSED (backend/spikes/rls_spike.py) — `SET LOCAL app.user_id` scoping through a pooled SQLAlchemy connection correctly isolates rows, and an unset session sees zero rows. Requires `ALTER TABLE ... FORCE ROW LEVEL SECURITY` on every RLS table, AND a non-superuser/non-BYPASSRLS app role: the dev `lexireview` role is superuser+BYPASSRLS, which bypasses RLS unconditionally even with FORCE set, so it cannot be trusted to enforce RLS. Future schema/migration work must (a) FORCE RLS on every user-scoped table and (b) run the app against a dedicated low-privilege role, not `lexireview` as currently provisioned. | PRD SEC-2 requires validation | A |
 | 2026-07-13 | LLM provider: Claude API for both dev and pilot | Model-family continuity between dev and bench, plus no-training API terms; LLM client stays provider-agnostic | A |
 | 2026-07-13 | Step 2 Console setup deferred | OPEN ITEM — must complete before any LLM client work | A |
 | 2026-07-13 | Model strings: dev = <Haiku-class choice>, pilot = <Sonnet-class choice> | — | A |
