@@ -19,6 +19,10 @@ class TerminalStateError(Exception):
     """Raised when a caller tries to mutate a job already in succeeded/failed."""
 
 
+class InvalidTransitionError(Exception):
+    """Raised when a transition is attempted from a state CONTRACTS.md §1 doesn't allow it from."""
+
+
 class TransientAnalysisError(Exception):
     """Raised by the analysis step for retryable failures (timeouts, connection errors)."""
 
@@ -40,6 +44,16 @@ def _format_error(category: str, message: str) -> str:
 def _assert_not_terminal(job: AnalysisJob) -> None:
     if job.state in TERMINAL_STATES:
         raise TerminalStateError(f"job {job.id} is already terminal ({job.state}); no further writes allowed")
+
+
+def _assert_from_state(job: AnalysisJob, expected: str) -> None:
+    """Only the arrows CONTRACTS.md §1 draws are valid transitions: queued->running,
+    running->succeeded, running->failed, running->queued. TerminalStateError takes
+    priority over InvalidTransitionError so terminal-immutability checks stay precise.
+    """
+    _assert_not_terminal(job)
+    if job.state != expected:
+        raise InvalidTransitionError(f"job {job.id} is {job.state}, expected {expected}")
 
 
 def _persist(session: Session, job: AnalysisJob) -> AnalysisJob:
@@ -76,7 +90,7 @@ def get_active_job(session: Session, *, user_id: uuid.UUID, doc_id: uuid.UUID) -
 
 
 def mark_running(session: Session, job: AnalysisJob) -> AnalysisJob:
-    _assert_not_terminal(job)
+    _assert_from_state(job, JobState.QUEUED.value)
     job.state = JobState.RUNNING.value
     if job.started_at is None:  # only the FIRST pickup sets started_at, per the contract
         job.started_at = _now()
@@ -84,7 +98,7 @@ def mark_running(session: Session, job: AnalysisJob) -> AnalysisJob:
 
 
 def mark_succeeded(session: Session, job: AnalysisJob) -> AnalysisJob:
-    _assert_not_terminal(job)
+    _assert_from_state(job, JobState.RUNNING.value)
     job.state = JobState.SUCCEEDED.value
     job.finished_at = _now()
     return _persist(session, job)
@@ -92,7 +106,7 @@ def mark_succeeded(session: Session, job: AnalysisJob) -> AnalysisJob:
 
 def mark_failed(session: Session, job: AnalysisJob, *, category: str, message: str) -> AnalysisJob:
     """Immediate, non-retryable terminal failure."""
-    _assert_not_terminal(job)
+    _assert_from_state(job, JobState.RUNNING.value)
     job.state = JobState.FAILED.value
     job.error_reason = _format_error(category, message)
     job.finished_at = _now()
@@ -101,7 +115,7 @@ def mark_failed(session: Session, job: AnalysisJob, *, category: str, message: s
 
 def mark_transient_failure(session: Session, job: AnalysisJob, *, category: str, message: str) -> AnalysisJob:
     """Requeue with retry_count += 1 up to MAX_RETRIES; the next failure after that exhausts retries -> failed."""
-    _assert_not_terminal(job)
+    _assert_from_state(job, JobState.RUNNING.value)
     job.error_reason = _format_error(category, message)
     if job.retry_count < MAX_RETRIES:
         job.retry_count += 1
