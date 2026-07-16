@@ -11,6 +11,30 @@ jobs:
     defaults:
       run:
         working-directory: backend
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: lexireview
+          POSTGRES_PASSWORD: lexireview_dev
+          POSTGRES_DB: lexireview
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U lexireview"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      POSTGRES_USER: lexireview
+      POSTGRES_PASSWORD: lexireview_dev
+      POSTGRES_DB: lexireview
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      DATABASE_URL: postgresql://lexireview:lexireview_dev@localhost:5432/lexireview
+      # CI-only app_user password for migration 001 (backend/alembic/versions);
+      # not a real secret, never used outside the ephemeral CI service container.
+      APP_USER_PASSWORD: ci_app_user_password_not_a_real_secret
     steps:
       - uses: actions/checkout@v4
 
@@ -27,6 +51,9 @@ jobs:
 
       - name: Security scan (bandit)
         run: bandit -r app -ll
+
+      - name: Migrate database (alembic upgrade head)
+        run: alembic upgrade head
 
       - name: Tests (pytest)
         run: pytest -q

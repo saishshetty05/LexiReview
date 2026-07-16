@@ -1,4 +1,4 @@
-# PROJECT_STATUS.md — Technical Setup Handoff (as of 13 July 2026, end of Step 6)
+# PROJECT_STATUS.md — Technical Setup Handoff (as of 15 July 2026, end of Step 7)
 
 Audience: Claude Code sessions working on this repo (and the two humans). You already know WHAT we are building (see CLAUDE.md and docs/PRD_LexiReview_v2_4_1_FINAL.docx). This file tells you WHERE THE PROJECT STANDS technically, what has been done, what is pending, and what happens next.
 
@@ -16,6 +16,9 @@ Audience: Claude Code sessions working on this repo (and the two humans). You al
   - docs: PRD v2.4.1 + decision log.
   - fix(worker): broker_connection_retry_on_startup=True (B's PR — Celery 6 deprecation warning is GONE from worker startup logs; verified on rebuild).
   - chore: .gitattributes (text=auto; LF for .yml/.py; *.docx binary) + decision-log row for the fileMode workaround (A's PR).
+  - #4 feat(worker): job state machine per CONTRACTS v1 (B's PR — backend/app/models.py AnalysisJob, jobs.py state-transition helpers, worker.py retry/DLQ wiring; 12 tests; analysis_jobs existed only as a SQLAlchemy model tested against SQLite, no Alembic migration yet).
+  - #5 docs: lock interface contracts v1 (B's PR — docs/CONTRACTS.md now LOCKED: analysis_jobs columns/state machine/retry semantics, Findings JSON schema + analysis_results storage shape, polling/unverified-findings boundary behaviors. Changes now require both people's approval).
+  - #6 spike(rls): validate RLS + FORCE + pooled connections (A's PR — backend/spikes/rls_spike.py, PASS: FORCE ROW LEVEL SECURITY plus a non-superuser/non-BYPASSRLS app role are both required; the dev `lexireview` role is superuser+BYPASSRLS and cannot enforce RLS. Closes the RLS decision-log placeholder).
 - Local machine quirks already handled (do not re-debug):
   - core.fileMode=false set on BOTH machines (Windows phantom "modified everywhere").
   - .gitattributes prevents CRLF churn. If a whole-repo phantom diff appears again, check `git diff --stat` for 0 insertions/deletions before assuming real changes.
@@ -32,23 +35,18 @@ Audience: Claude Code sessions working on this repo (and the two humans). You al
 - Both humans have run this loop end to end (one PR authored each, one reviewed each), including an update-branch queue event and a CI --watch race (harmless; re-watch).
 
 ## 5. Open items (tracked in docs/DECISION_LOG.md)
-- OPEN: Anthropic Console workspace + two named API keys + spend limit. Decision made: Claude API for dev AND pilot (Haiku-class for dev, Sonnet-class pinned for bench); free trial credits first, paid top-up ~week 8. BLOCKS: any LLM client work beyond a stub. Owner: B.
-- OPEN: model strings row in the decision log still has placeholders.
+- OPEN: Anthropic Console workspace + two named API keys + spend limit. Decision made: Claude API for dev AND pilot (Haiku-class for dev, Sonnet-class pinned for bench); free trial credits first, paid top-up ~week 8. BLOCKS: any LLM client work beyond a stub. Owner: B. This is the only open item — everything else in this section as of Step 6 has closed (RLS decision closed by PR #6; CONTRACTS.md locked by PR #5).
 - Constitution reminders that constrain upcoming work: SYNTHETIC_ONLY=true enforced in the LLM client while on trial/free tiers; PII gateway must be live before the first LLM call on any non-synthetic document; only doc_id/user_id transit the queue.
 
-## 6. CURRENT STEP — Step 7: the contracts session (both humans, ~30–45 min)
-Purpose: lock the interface where A's lane hands off to B's lane, in docs/CONTRACTS.md, via one PR (proposed branch: b/contracts-v1, authored by B, reviewed by A strictly for "is this what we agreed?"). After merge, changing CONTRACTS.md requires both approvals.
+## 6. Step 7 — CLOSED: interface contracts locked
+docs/CONTRACTS.md v1 merged (PR #5): analysis_jobs columns/state machine/retry semantics, Findings JSON schema, analysis_results storage shape, and the polling/unverified-findings boundary behaviors are all DECIDED and locked. Changing CONTRACTS.md now requires both people's approval.
 
-Decisions the humans must make (Claude: help draft, do not decide for them):
-
-- `analysis_jobs` table — final columns: id uuid pk · user_id fk · doc_id fk · doc_version_hash text · state · retry_count int · error_reason text NULLABLE (metadata only, NEVER document content) · created_at · started_at · finished_at. State machine: queued -> running -> succeeded | failed. Decide: retry semantics (failed->queued vs running with retry_count++) and writer rules (proposal: API writes only the initial queued row; worker owns all transitions).
-- Findings JSON — one finding object with: category (enum: the 12 FR-9a clause categories + "inconsistency"), severity (high|medium|low|info), block_ids (array; exactly 2 for inconsistency), evidence_quote (verbatim), explanation, verification (verified|unverified — unverified is FLAGGED, never dropped, per constitution rule 6), confidence (standard|needs_review). Storage proposal: analysis_results table, one row per finding, JSONB payload + extracted columns for filtering. Exercise: write the exact JSON for one fake lease with a rent inconsistency before finalizing the schema.
-- Boundary behaviors: (a) API response shape while a job is running (polling); (b) how unverified findings are stored and rendered.
-
-## 7. Immediately after Step 7 (Step 8 — lanes split, parallel work begins)
-- A1: RLS spike (backend/spikes/rls_spike.py proving Row-Level Security with SET LOCAL app.user_id through a pooled SQLAlchemy connection; PASS/FAIL output; result closes the placeholder decision-log row). Then schema migrations (Alembic), auth, upload endpoint wired to preflight.py.
-- B1: Celery job plumbing (pass-by-ID, states per the contract, retries/backoff, DLQ) — DONE (backend/app/models.py, jobs.py, worker.py; b/job-plumbing). Note: analysis_jobs exists only as a SQLAlchemy model, tested against SQLite — no Alembic migration yet, since migrations are A's lane; the table isn't in the real Postgres DB until that migration lands.
-- B2: extraction (pypdf/python-docx) in per-job random temp dirs purged in finally, then [BLOCK_n] anchors, then the LLM client STUB (provider-agnostic, refuses un-pseudonymised or non-synthetic payloads — no real key needed yet).
+## 7. CURRENT STEP — Step 8: lanes split, parallel work in progress
+- A1: RLS spike — DONE (PR #6, backend/spikes/rls_spike.py, PASS). Finding: FORCE ROW LEVEL SECURITY plus a non-superuser/non-BYPASSRLS role are both required; `lexireview` cannot enforce RLS on its own.
+- A2: schema migrations (Alembic) — IN PROGRESS (branch a/schema-migrations). Migration 001 creates users/documents/analysis_jobs/analysis_results/audit_log, applies FORCE RLS per the spike finding, and introduces the app_user non-superuser role the app connects as (APP_DATABASE_URL). Split into two PRs: schema (this one) and migration/RLS tests (a/schema-migration-tests, merges only after its tests pass locally).
+- A3 (next, not started): auth, upload endpoint wired to preflight.py.
+- B1: Celery job plumbing (pass-by-ID, states per the contract, retries/backoff, DLQ) — DONE (backend/app/models.py, jobs.py, worker.py; PR #4). analysis_jobs now has a real migration as of A2 above.
+- B2 (next, not started): extraction (pypdf/python-docx) in per-job random temp dirs purged in finally, then [BLOCK_n] anchors, then the LLM client STUB (provider-agnostic, refuses un-pseudonymised or non-synthetic payloads — no real key needed yet).
 
 ## 8. How to keep this file useful
 Update PROJECT_STATUS.md in the same PR whenever a step closes or an open item resolves. It is the orientation file for any fresh Claude session; stale status is worse than no status.
