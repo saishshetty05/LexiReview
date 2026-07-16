@@ -46,6 +46,10 @@ services:
     build: ./backend
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     env_file: .env
+    environment:
+      # Migrations run against DATABASE_URL (owner role, DDL). The running
+      # app must use APP_DATABASE_URL (app_user, RLS-enforced) instead.
+      APP_DATABASE_URL: postgresql://app_user:${APP_USER_PASSWORD}@postgres:5432/${POSTGRES_DB:-lexireview}
     volumes:
       - ./backend:/code
     ports:
@@ -62,6 +66,8 @@ services:
     build: ./backend
     command: celery -A app.worker.celery_app worker --loglevel=info
     env_file: .env
+    environment:
+      APP_DATABASE_URL: postgresql://app_user:${APP_USER_PASSWORD}@postgres:5432/${POSTGRES_DB:-lexireview}
     volumes:
       - ./backend:/code
     depends_on:
