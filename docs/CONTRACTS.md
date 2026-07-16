@@ -81,6 +81,40 @@ payload JSONB (the full finding object), created_at. Findings are immutable once
 written; reviewer decisions (accept/edit/dismiss) go in a separate table later —
 they never mutate the AI's original output (audit-trail principle).
 
+## 2b. Document summary (v1.1 — not a finding, not covered by v1)
+
+Closes the 2026-07-15 OPEN item: "storage location for the document summary
+(not a finding; not covered by CONTRACTS v1)".
+
+DECIDED — storage: a new `document_summaries` table, one row per
+`(doc_version_hash, model_version)`. Columns: id uuid PK · user_id uuid FK
+(denormalized for RLS, same pattern as `analysis_results`) · doc_id uuid FK ·
+doc_version_hash text · model_version text · payload JSONB (summary content
+shape is B's to define; out of scope here) · created_at timestamptz. Written
+once by the worker after analysis completes; never updated afterward.
+
+A nullable column on `documents` was considered and rejected: app_user has no
+UPDATE grant on `documents` (immutability grants, migration 001), so a
+summary column there would be unwritable after the initial insert. A separate
+table, granted INSERT+SELECT only (no UPDATE/DELETE) with FORCE ROW LEVEL
+SECURITY, keeps the same immutability design as `documents`/`analysis_results`
+instead of requiring an exception to it.
+
+If the summarization model/prompt changes, a new row is written for the new
+`model_version` rather than overwriting the old one — old summaries for a
+superseded `model_version` are retained (app_user has no DELETE grant),
+consistent with the platform's immutable-artifact pattern.
+
+DECIDED — boundary: `GET /documents/{id}/summary` returns the payload for the
+document's current version and the pinned `model_version`. This is a
+separate endpoint from the jobs/findings endpoints in §3 — no summary
+content ever appears on `GET /jobs/{id}` or `GET /jobs/{id}/findings`, the
+same "document-derived content stays out of the jobs endpoint" rule §3(a)
+already establishes for findings.
+
+Migration for the table itself lands separately, in Person A's schema lane,
+alongside the next schema change — this section locks the shape only.
+
 ## 3. Boundary behaviors
 
 DECIDED — (a) polling shape: `GET /jobs/{id}` returns
@@ -101,3 +135,6 @@ exported as verified.
 - v1 (2026-07-13): initial locked version. All DECIDED items chosen from the
   defaults proposed in PROJECT_STATUS.md §6; example finding written for the fake
   lease rent-inconsistency case (BLOCK_4 vs BLOCK_19).
+- v1.1 (2026-07-16): added §2b, document summary storage (`document_summaries`
+  table + `GET /documents/{id}/summary`). Closes the 2026-07-15 OPEN item on
+  summary storage location. No changes to any v1 section.
