@@ -69,10 +69,13 @@ def upgrade() -> None:
         sa.text("SELECT 1 FROM pg_roles WHERE rolname = :role"), {"role": APP_ROLE}
     ).scalar()
     if not role_exists:
-        bind.execute(
-            sa.text(f"CREATE ROLE {APP_ROLE} LOGIN PASSWORD :pw"),
-            {"pw": _app_role_password()},
-        )
+        # CREATE ROLE ... PASSWORD is DDL — Postgres does not accept bind
+        # parameters there (the server sends back a syntax error on the
+        # placeholder), so the literal must be escaped and inlined instead.
+        # Safe here because the password is operator-controlled (env var),
+        # not user input; quotes are still doubled defensively.
+        escaped_password = _app_role_password().replace("'", "''")
+        bind.execute(sa.text(f"CREATE ROLE {APP_ROLE} LOGIN PASSWORD '{escaped_password}'"))
 
     # ── users ──────────────────────────────────────────────────────────
     op.create_table(
