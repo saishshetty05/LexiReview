@@ -3,9 +3,12 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid
+from contextlib import contextmanager
+from typing import Iterator
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import Session, sessionmaker
 
 logger = logging.getLogger(__name__)
 
@@ -42,3 +45,29 @@ DATABASE_URL = _normalize(_resolve_database_url())
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
+
+
+@contextmanager
+def app_user_session(user_id: uuid.UUID) -> Iterator[Session]:
+    """Open a session and apply `SET LOCAL app.user_id` for RLS scoping.
+
+    Shared by every code path (API, worker) that reads/writes user-owned
+    rows, so RLS is the single source of truth for row scoping instead of
+    each caller remembering to add its own user_id filter. Commits on a
+    clean exit, rolls back on any exception.
+    """
+    session = SessionLocal()
+    try:
+        # SET LOCAL, like CREATE ROLE, is DDL/config -- Postgres rejects bind
+        # parameters there ("syntax error at or near $1"). uuid.UUID(...) both
+        # validates the input and produces a string of only hex digits and
+        # hyphens, which is safe to inline directly (same pattern as
+        # backend/tests/test_rls_smoke.py).
+        session.execute(text(f"SET LOCAL app.user_id = '{uuid.UUID(str(user_id))}'"))
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
