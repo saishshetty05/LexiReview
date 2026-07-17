@@ -130,6 +130,54 @@ the UI must render them in a visually distinct "Unverified — quote could not b
 matched to the document" section. They count in the findings total. They are never
 exported as verified.
 
+## 4. Document storage (v1.2)
+
+`backend/app/storage.py` is the lane-boundary interface between the ingestion
+side (owns `documents` rows and uploads) and the analysis side (the worker,
+which fetches blobs to extract from). This section locks the `fetch_document`
+signature and error semantics; `put_document` is not part of the boundary
+(only the ingestion side calls it) and is documented in the module itself.
+
+```
+fetch_document(doc_id: uuid.UUID, user_id: uuid.UUID, doc_version_hash: str) -> bytes
+```
+
+Raises one of three typed errors (category + message only — never document
+content or a filename that might contain a party name, CLAUDE.md rule 2):
+
+| Case | Error category |
+|---|---|
+| No `documents` row exists for `doc_id` | `document_not_found` |
+| A `documents` row exists for `doc_id` but is owned by a different user | `document_not_found` |
+| A `documents` row for `doc_id` is owned by the caller, but none of the caller's versions has the given `doc_version_hash` | `version_mismatch` |
+| A row matching `doc_id` + `doc_version_hash`, owned by the caller, exists — but the S3/MinIO object at its key is gone | `object_missing` |
+
+DECIDED — anti-enumeration is structural, not a matching pair of error
+messages. `fetch_document` scopes its lookup through `app_user_session`
+(`SET LOCAL app.user_id`), so a single query — `SELECT ... WHERE doc_id =
+:doc_id` — is what RLS filters. "No row for this doc_id" and "a row exists
+but belongs to someone else" are not two branches that happen to raise the
+same error; they are the *same* branch, because RLS has already made both
+cases produce zero visible rows before the Python code ever runs. There is
+no code path that could distinguish them even if a future refactor wanted
+to, short of removing the RLS scoping itself. That is what makes
+`document_not_found` proof against enumeration by construction rather than
+convention — category, message, and timing profile are identical because
+it is literally one `if not rows: raise ...` line, not two.
+
+DECIDED — `version_mismatch` can only ever be reached for a `doc_id` the
+caller actually owns, for the same structural reason: it sits in the branch
+taken only after the empty-rowset check above has already failed to fire —
+i.e., only once RLS has let at least one row for this `doc_id` through,
+which by definition means the caller owns at least one version of it. A
+missing or not-owned `doc_id` never reaches the hash-comparison code at
+all, so returning `version_mismatch` can never leak "this doc_id exists
+(for someone)" the way reusing it for a not-owned document would.
+
+DECIDED — key convention: `{user_id}/{doc_id}/v{version}`, fully derivable
+from an existing `documents` row with no schema change (see
+`docs/DECISION_LOG.md`, 2026-07-17).
+
 ## Change log
 
 - v1 (2026-07-13): initial locked version. All DECIDED items chosen from the
@@ -138,3 +186,6 @@ exported as verified.
 - v1.1 (2026-07-16): added §2b, document summary storage (`document_summaries`
   table + `GET /documents/{id}/summary`). Closes the 2026-07-15 OPEN item on
   summary storage location. No changes to any v1 section.
+- v1.2 (2026-07-17): added §4, document storage (`fetch_document` signature +
+  error semantics, deterministic key convention). No changes to any prior
+  section.

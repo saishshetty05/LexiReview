@@ -3,9 +3,12 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid
+from contextlib import contextmanager
+from typing import Iterator
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import Session, sessionmaker
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +30,19 @@ def _resolve_database_url() -> str:
     app_url = os.environ.get("APP_DATABASE_URL")
     if app_url:
         return app_url
+    if os.environ.get("CI") == "true":
+        # The dev-machine WARNING below is not loud enough for CI: a missing
+        # APP_DATABASE_URL there means every RLS-dependent test silently runs
+        # as the owner/BYPASSRLS role, which can make an RLS regression pass
+        # CI green (see docs/DECISION_LOG.md, PR #14 CI-red root cause). Fail
+        # hard instead of warning so this class of misconfiguration can never
+        # be silent in CI again.
+        raise RuntimeError(
+            "APP_DATABASE_URL is not set in CI. Refusing to fall back to "
+            "DATABASE_URL (owner/BYPASSRLS role) — this would silently run "
+            "RLS-dependent tests without RLS enforcement. Set APP_DATABASE_URL "
+            "in the CI workflow env."
+        )
     logger.warning(
         "APP_DATABASE_URL is not set — falling back to DATABASE_URL. "
         "This means the app is running with OWNER credentials and RLS is NOT "
@@ -42,3 +58,29 @@ DATABASE_URL = _normalize(_resolve_database_url())
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
+
+
+@contextmanager
+def app_user_session(user_id: uuid.UUID) -> Iterator[Session]:
+    """Open a session and apply `SET LOCAL app.user_id` for RLS scoping.
+
+    Shared by every code path (API, worker) that reads/writes user-owned
+    rows, so RLS is the single source of truth for row scoping instead of
+    each caller remembering to add its own user_id filter. Commits on a
+    clean exit, rolls back on any exception.
+    """
+    session = SessionLocal()
+    try:
+        # SET LOCAL, like CREATE ROLE, is DDL/config -- Postgres rejects bind
+        # parameters there ("syntax error at or near $1"). uuid.UUID(...) both
+        # validates the input and produces a string of only hex digits and
+        # hyphens, which is safe to inline directly (same pattern as
+        # backend/tests/test_rls_smoke.py).
+        session.execute(text(f"SET LOCAL app.user_id = '{uuid.UUID(str(user_id))}'"))
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
