@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from app.verifier import FUZZY_MATCH_THRESHOLD, verify_quote
 
 SOURCE = (
@@ -73,3 +75,17 @@ def test_inconsistency_verification_uses_weakest_span():
     )
     result = verify_quote(SOURCE, quote)
     assert result.match_score < FUZZY_MATCH_THRESHOLD
+
+
+def test_inconsistency_quote_with_more_than_two_spans_raises():
+    """CONTRACTS.md §2: inconsistency findings have EXACTLY 2 block_ids, i.e.
+    exactly 2 conflicting spans. A quote where the separator appears more
+    than once is a caller bug, not a verification outcome — must fail loud,
+    not silently score against an unexpected span count."""
+    quote = (
+        "The monthly rent shall be Rs. 50,000 [...] "
+        "monthly rent of Rs. 60,000 effective from the second year [...] "
+        "a third, unexpected span"
+    )
+    with pytest.raises(AssertionError):
+        verify_quote(SOURCE, quote)
