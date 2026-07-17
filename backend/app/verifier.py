@@ -48,11 +48,13 @@ def verify_quote(source_text: str, quote: str) -> VerificationResult:
         # CONTRACTS.md §2: inconsistency findings have EXACTLY 2 block_ids,
         # i.e. exactly 2 conflicting spans. A malformed quote (the separator
         # appearing more than once) is a caller bug, not a verification
-        # outcome to score — fail loud rather than silently verifying
-        # against an unexpected span count.
-        assert len(spans) == 2, (
-            f"inconsistency evidence_quote must split into exactly 2 spans, got {len(spans)}"
-        )
+        # outcome to score — fail loud rather than silently verifying against
+        # an unexpected span count. A plain `assert` would be stripped under
+        # Python's -O flag, silently disabling this check, so raise instead.
+        if len(spans) != 2:
+            raise ValueError(
+                f"inconsistency evidence_quote must split into exactly 2 spans, got {len(spans)}"
+            )
     else:
         spans = [quote]
 

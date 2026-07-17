@@ -87,5 +87,5 @@ def test_inconsistency_quote_with_more_than_two_spans_raises():
         "monthly rent of Rs. 60,000 effective from the second year [...] "
         "a third, unexpected span"
     )
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError):
         verify_quote(SOURCE, quote)
