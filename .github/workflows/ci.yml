@@ -34,7 +34,14 @@ jobs:
       DATABASE_URL: postgresql://lexireview:lexireview_dev@localhost:5432/lexireview
       # CI-only app_user password for migration 001 (backend/alembic/versions);
       # not a real secret, never used outside the ephemeral CI service container.
+      # Distinct from POSTGRES_PASSWORD (the owner/superuser role) above.
       APP_USER_PASSWORD: ci_app_user_password_not_a_real_secret
+      # Must be set before "Migrate database" (which creates app_user from
+      # APP_USER_PASSWORD) and is inherited by every later step including
+      # pytest. Without this, db.py's owner-role fallback silently runs
+      # RLS-dependent tests (e.g. storage.py's anti-enumeration test) as the
+      # superuser/BYPASSRLS role, bypassing RLS entirely (see DECISION_LOG.md).
+      APP_DATABASE_URL: postgresql://app_user:ci_app_user_password_not_a_real_secret@localhost:5432/lexireview
     steps:
       - uses: actions/checkout@v4
 

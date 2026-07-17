@@ -30,6 +30,19 @@ def _resolve_database_url() -> str:
     app_url = os.environ.get("APP_DATABASE_URL")
     if app_url:
         return app_url
+    if os.environ.get("CI") == "true":
+        # The dev-machine WARNING below is not loud enough for CI: a missing
+        # APP_DATABASE_URL there means every RLS-dependent test silently runs
+        # as the owner/BYPASSRLS role, which can make an RLS regression pass
+        # CI green (see docs/DECISION_LOG.md, PR #14 CI-red root cause). Fail
+        # hard instead of warning so this class of misconfiguration can never
+        # be silent in CI again.
+        raise RuntimeError(
+            "APP_DATABASE_URL is not set in CI. Refusing to fall back to "
+            "DATABASE_URL (owner/BYPASSRLS role) — this would silently run "
+            "RLS-dependent tests without RLS enforcement. Set APP_DATABASE_URL "
+            "in the CI workflow env."
+        )
     logger.warning(
         "APP_DATABASE_URL is not set — falling back to DATABASE_URL. "
         "This means the app is running with OWNER credentials and RLS is NOT "
