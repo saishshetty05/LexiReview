@@ -1,4 +1,4 @@
-# PROJECT_STATUS.md — Technical Setup Handoff (as of 15 July 2026, end of Step 7)
+# PROJECT_STATUS.md — Technical Setup Handoff (as of 17 July 2026, mid Step 8)
 
 Audience: Claude Code sessions working on this repo (and the two humans). You already know WHAT we are building (see CLAUDE.md and docs/PRD_LexiReview_v2_4_1_FINAL.docx). This file tells you WHERE THE PROJECT STANDS technically, what has been done, what is pending, and what happens next.
 
@@ -35,7 +35,9 @@ Audience: Claude Code sessions working on this repo (and the two humans). You al
 - Both humans have run this loop end to end (one PR authored each, one reviewed each), including an update-branch queue event and a CI --watch race (harmless; re-watch).
 
 ## 5. Open items (tracked in docs/DECISION_LOG.md)
-- OPEN: Anthropic Console workspace + two named API keys + spend limit. Decision made: Claude API for dev AND pilot (Haiku-class for dev, Sonnet-class pinned for bench); free trial credits first, paid top-up ~week 8. BLOCKS: any LLM client work beyond a stub. Owner: B. This is the only open item — everything else in this section as of Step 6 has closed (RLS decision closed by PR #6; CONTRACTS.md locked by PR #5).
+- OPEN: Anthropic Console workspace + two named API keys + spend limit. Decision made: Claude API for dev AND pilot (Haiku-class for dev, Sonnet-class pinned for bench); free trial credits first, paid top-up ~week 8. BLOCKS: the real provider call in LLMClient.analyze() (currently a stub — see §7, B2). Owner: B. Deliberately not being worked right now.
+- OPEN: `is_synthetic` per-document flag. `run_analysis()` (analysis_pipeline.py, on branch b/analysis-pipeline, not yet a PR) needs an `is_synthetic` bool per document to pass to `LLMClient.analyze()`, but nothing tracks this today — not on `documents`, not on `analysis_jobs`, not in CONTRACTS.md. Adding it means a schema column (A's lane) + a CONTRACTS.md version bump (needs both people's approval, same as any CONTRACTS change). Raised with A on 2026-07-17; blocks finishing the `_execute_analysis` wiring (worker.py) until resolved. Stopgap of hardcoding `True` (SYNTHETIC_ONLY already restricts dev/free-tier traffic to synthetic docs regardless) was considered but not adopted — waiting for A's decision instead.
+- OPEN: PR #13 (b/pii-gateway) and PR #15 (verifier cardinality fix) are both CI-green and awaiting A's review — B can't self-approve (GitHub rejects it, and it'd violate the review rule in §4 anyway).
 - Constitution reminders that constrain upcoming work: SYNTHETIC_ONLY=true enforced in the LLM client while on trial/free tiers; PII gateway must be live before the first LLM call on any non-synthetic document; only doc_id/user_id transit the queue.
 
 ## 6. Step 7 — CLOSED: interface contracts locked
@@ -43,10 +45,15 @@ docs/CONTRACTS.md v1 merged (PR #5): analysis_jobs columns/state machine/retry s
 
 ## 7. CURRENT STEP — Step 8: lanes split, parallel work in progress
 - A1: RLS spike — DONE (PR #6, backend/spikes/rls_spike.py, PASS). Finding: FORCE ROW LEVEL SECURITY plus a non-superuser/non-BYPASSRLS role are both required; `lexireview` cannot enforce RLS on its own.
-- A2: schema migrations (Alembic) — IN PROGRESS (branch a/schema-migrations). Migration 001 creates users/documents/analysis_jobs/analysis_results/audit_log, applies FORCE RLS per the spike finding, and introduces the app_user non-superuser role the app connects as (APP_DATABASE_URL). Split into two PRs: schema (this one) and migration/RLS tests (a/schema-migration-tests, merges only after its tests pass locally).
+- A2: schema migrations (Alembic) — DONE (PR #8 schema, PR #9 migration/RLS tests). Migration 001 creates users/documents/analysis_jobs/analysis_results/audit_log, applies FORCE RLS, introduces the app_user non-superuser role (APP_DATABASE_URL).
+- A4: document storage — DONE (PR #14, backend/app/storage.py: put_document/fetch_document, CONTRACTS.md §4 v1.2). Ships with the app_user_session context manager in db.py, shared by the worker. Landed with a CI fix (1ba93fd): ci.yml wasn't setting APP_DATABASE_URL, so RLS-dependent tests were silently running under the owner/BYPASSRLS role — db.py's fallback now fails hard instead of warning when CI=true. (Done out of order, ahead of A3.)
 - A3 (next, not started): auth, upload endpoint wired to preflight.py.
-- B1: Celery job plumbing (pass-by-ID, states per the contract, retries/backoff, DLQ) — DONE (backend/app/models.py, jobs.py, worker.py; PR #4). analysis_jobs now has a real migration as of A2 above.
-- B2 (next, not started): extraction (pypdf/python-docx) in per-job random temp dirs purged in finally, then [BLOCK_n] anchors, then the LLM client STUB (provider-agnostic, refuses un-pseudonymised or non-synthetic payloads — no real key needed yet).
+- B1: Celery job plumbing (pass-by-ID, states per the contract, retries/backoff, DLQ) — DONE (backend/app/models.py, jobs.py, worker.py; PR #4).
+- B2: extraction (pypdf/python-docx, per-job random temp dirs) + [BLOCK_n] anchors — DONE (PR #7). LLM client — DONE as a STUB (PR #10): enforces every CLAUDE.md rule 3 guardrail (pseudonymisation required, SYNTHETIC_ONLY on free tiers, API-key presence) but `LLMClient.analyze()` still raises `NotImplementedError` after guardrails pass — no real provider call is wired up yet. Blocked on the Anthropic Console open item above.
+- B3: quote verifier — DONE (PR #12). A retro-review on 2026-07-17 found the inconsistency-span split had no cardinality check; closed via PR #15 (raises `ValueError` for anything but exactly 2 spans — not a plain `assert`, since bandit flagged that asserts are stripped under `-O`).
+- B4: PII gateway — PR #13 OPEN, CI green, rebased onto main, awaiting A's review. Pattern-based redaction only (email/phone/PAN/Aadhaar/SSN); names/addresses deliberately deferred (see DECISION_LOG.md).
+- B5: analysis_pipeline.py — composes extract → pseudonymise → anchor → LLMClient.analyze → verify into `run_analysis()`. Written and tested on local branch `b/analysis-pipeline`, not yet opened as a PR (blocked on #13 merging first, since it imports `app.pii_gateway`).
+- B6 (next, blocked): wire `_execute_analysis` in worker.py (currently a no-op placeholder) to call `run_analysis()`. Blocked on the `is_synthetic` open item above — everything else it needs (storage, extraction, anchors, PII gateway, verifier) exists.
 
 ## 8. How to keep this file useful
 Update PROJECT_STATUS.md in the same PR whenever a step closes or an open item resolves. It is the orientation file for any fresh Claude session; stale status is worse than no status.
