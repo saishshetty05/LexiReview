@@ -10,15 +10,26 @@ Audience: Claude Code sessions working on this repo (and the two humans). You al
 ## 2. Repository state
 - Repo: https://github.com/saishshetty05/LexiReview (private, name capitalization is "LexiReview"; local folders are C:\projects\lexireview on both machines).
 - Branch protection via ruleset "protect-main", ACTIVE, no bypass list: (a) PR required, 1 approval; (b) required status check: "ci"; (c) branches must be up to date before merging (expect the "update branch" step when main moves); (d) force pushes and deletions blocked.
-- CI: .github/workflows/ci.yml — ruff (lint), bandit (security), pytest (currently the 5 preflight tests). Green on main.
-- Merged history (squash merges):
-  - Initial skeleton (compose stack, CLAUDE.md, CI, backend/app/preflight.py).
-  - docs: PRD v2.4.1 + decision log.
-  - fix(worker): broker_connection_retry_on_startup=True (B's PR — Celery 6 deprecation warning is GONE from worker startup logs; verified on rebuild).
-  - chore: .gitattributes (text=auto; LF for .yml/.py; *.docx binary) + decision-log row for the fileMode workaround (A's PR).
-  - #4 feat(worker): job state machine per CONTRACTS v1 (B's PR — backend/app/models.py AnalysisJob, jobs.py state-transition helpers, worker.py retry/DLQ wiring; 12 tests; analysis_jobs existed only as a SQLAlchemy model tested against SQLite, no Alembic migration yet).
-  - #5 docs: lock interface contracts v1 (B's PR — docs/CONTRACTS.md now LOCKED: analysis_jobs columns/state machine/retry semantics, Findings JSON schema + analysis_results storage shape, polling/unverified-findings boundary behaviors. Changes now require both people's approval).
-  - #6 spike(rls): validate RLS + FORCE + pooled connections (A's PR — backend/spikes/rls_spike.py, PASS: FORCE ROW LEVEL SECURITY plus a non-superuser/non-BYPASSRLS app role are both required; the dev `lexireview` role is superuser+BYPASSRLS and cannot enforce RLS. Closes the RLS decision-log placeholder).
+- CI: .github/workflows/ci.yml — ruff (lint), bandit (security), pytest. Green on main.
+- Canonical local test verification: plain `docker compose exec api pytest -q` — no env override needed (fixed 2026-07-18, see the vantage-point row in DECISION_LOG.md). Current count: **68 passed**, confirmed equal from all three vantage points (in-container plain, host shell with DATABASE_URL/APP_DATABASE_URL pointed at localhost, and a local CI-env simulation).
+- Merged-PR list (source of truth: `gh pr list --state merged`, chronological by merge time):
+  - #2 fix(worker): set broker_connection_retry_on_startup to silence Celery… (NikhilKatti29)
+  - #1 chore: add .gitattributes; log fileMode workaround (saishshetty05)
+  - #3 docs: add PROJECT_STATUS.md technical handoff (saishshetty05)
+  - #5 docs: lock interface contracts v1 (NikhilKatti29)
+  - #4 feat(worker): job state machine per CONTRACTS v1 (NikhilKatti29)
+  - #6 spike(rls): validate RLS + FORCE + pooled connections (SEC-2) (saishshetty05)
+  - #9 test(db): migration-apply + RLS smoke tests; CI Postgres service (saishshetty05)
+  - #8 feat(db): schema v1 with FORCE RLS and non-superuser app role (saishshetty05)
+  - #7 feat(analysis): extraction + block anchors with per-job temp dirs (NikhilKatti29)
+  - #11 docs: CONTRACTS v1.1 — document_summaries table (NikhilKatti29)
+  - #10 feat(analysis): provider-agnostic LLM client stub with guardrails (NikhilKatti29)
+  - #12 feat(analysis): deterministic quote verifier (NikhilKatti29)
+  - #14 feat(storage): put/fetch document with RLS-scoped anti-enumeration errors; CONTRACTS v1.2 (saishshetty05)
+  - #13 feat(analysis): pattern-based PII redaction gate (NikhilKatti29)
+  - #17 feat(analysis): implement the anthropic provider call in LLMClient (NikhilKatti29)
+  - #16 docs: refresh PROJECT_STATUS.md for mid-Step-8 state (NikhilKatti29)
+  - Still OPEN (not in this list): #15 fix(analysis): assert exactly 2 spans on inconsistency evidence_quote; #18 feat(db): migration 002 — is_synthetic + document_summaries (CONTRACTS v1.3).
 - Local machine quirks already handled (do not re-debug):
   - core.fileMode=false set on BOTH machines (Windows phantom "modified everywhere").
   - .gitattributes prevents CRLF churn. If a whole-repo phantom diff appears again, check `git diff --stat` for 0 insertions/deletions before assuming real changes.
