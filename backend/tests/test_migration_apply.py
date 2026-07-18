@@ -1,8 +1,9 @@
-"""Verifies migration 001 applied cleanly: all tables exist, app_user is a
-real non-superuser/non-BYPASSRLS role, FORCE ROW LEVEL SECURITY is set on
-every user-data table, and app_user's grants match the immutability design
-in the migration docstring / docs/DECISION_LOG.md (2026-07-15) — in
-particular, no DELETE anywhere, no UPDATE on the immutable tables.
+"""Verifies migrations 001+002 applied cleanly: all tables exist (including
+002's document_summaries), app_user is a real non-superuser/non-BYPASSRLS
+role, FORCE ROW LEVEL SECURITY is set on every user-data table, and
+app_user's grants match the immutability design in the migration docstrings
+/ docs/DECISION_LOG.md (2026-07-15, 2026-07-18) — in particular, no DELETE
+anywhere, no UPDATE on the immutable tables (document_summaries included).
 
 Assumes `alembic upgrade head` has already been run against DATABASE_URL —
 CI does this in its own step before pytest; locally, run it yourself first
@@ -10,11 +11,24 @@ CI does this in its own step before pytest; locally, run it yourself first
 """
 from __future__ import annotations
 
+import os
+import subprocess
+from pathlib import Path
+
 from sqlalchemy import text
 
-EXPECTED_TABLES = {"users", "documents", "analysis_jobs", "analysis_results", "audit_log"}
+BACKEND_DIR = Path(__file__).resolve().parent.parent
 
-IMMUTABLE_TABLES = ("documents", "analysis_results", "audit_log")
+EXPECTED_TABLES = {
+    "users",
+    "documents",
+    "analysis_jobs",
+    "analysis_results",
+    "audit_log",
+    "document_summaries",
+}
+
+IMMUTABLE_TABLES = ("documents", "analysis_results", "audit_log", "document_summaries")
 
 
 def test_all_tables_exist(pg_owner_engine):
@@ -80,6 +94,53 @@ def test_analysis_jobs_and_users_allow_update(pg_owner_engine):
     assert privileges_by_table["analysis_jobs"] == {"SELECT", "INSERT", "UPDATE"}
     # users: profile updates allowed.
     assert privileges_by_table["users"] == {"SELECT", "INSERT", "UPDATE"}
+
+
+def test_migration_002_applies_and_downgrades_cleanly(pg_owner_engine):
+    """Assumes the test DB starts at head (002). Downgrades to 001, checks
+    document_summaries and documents.is_synthetic are both gone, then
+    re-upgrades to head and checks they're both back — leaving the DB at
+    head for every other test in the suite, same as it started.
+    """
+
+    def _run(*args: str) -> None:
+        subprocess.run(
+            ["python", "-m", "alembic", *args],
+            cwd=BACKEND_DIR,
+            env=os.environ,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    def _document_summaries_exists() -> bool:
+        with pg_owner_engine.connect() as conn:
+            return bool(
+                conn.execute(
+                    text("SELECT 1 FROM pg_tables WHERE tablename = 'document_summaries'")
+                ).scalar()
+            )
+
+    def _is_synthetic_exists() -> bool:
+        with pg_owner_engine.connect() as conn:
+            return bool(
+                conn.execute(
+                    text(
+                        "SELECT 1 FROM information_schema.columns "
+                        "WHERE table_name = 'documents' AND column_name = 'is_synthetic'"
+                    )
+                ).scalar()
+            )
+
+    try:
+        _run("downgrade", "001_schema_v1")
+        assert not _document_summaries_exists()
+        assert not _is_synthetic_exists()
+    finally:
+        _run("upgrade", "head")
+
+    assert _document_summaries_exists()
+    assert _is_synthetic_exists()
 
 
 def _app_user_privileges(pg_owner_engine) -> dict[str, set[str]]:

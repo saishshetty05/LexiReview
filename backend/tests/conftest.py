@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from urllib.parse import urlparse
 
 import pytest
 from sqlalchemy import create_engine
@@ -28,12 +29,42 @@ def session():
 
 
 def _pg_conn_params() -> dict[str, str]:
+    """Resolve the Postgres host/port/db these fixtures connect to.
+
+    The "vantage point" bug: pytest's own network vantage point (host shell
+    vs. inside the api container vs. a CI runner) determines what hostname
+    actually reaches Postgres, and a single hardcoded default can't be right
+    for all three. Resolution chain, in order:
+
+    1. TEST_DATABASE_URL — set this to override the vantage point explicitly
+       (rarely needed; covers any setup the two defaults below don't).
+    2. DATABASE_URL — already set correctly for the two vantage points that
+       matter day to day: `postgres` (the compose service name) from inside
+       the api container, `localhost` in CI (ci.yml sets it directly). Reusing
+       it means plain `docker compose exec api pytest -q` and CI both work
+       with no extra env override.
+    3. A bare-localhost default, for a host shell with no compose env sourced
+       at all.
+
+    Only host/port/db are taken from the resolved URL — user/password stay
+    on their own POSTGRES_USER/POSTGRES_PASSWORD env vars (or app_user's
+    APP_USER_PASSWORD, in pg_app_engine) since owner and app roles need
+    different credentials than whatever DATABASE_URL's URL-embedded ones are.
+    """
+    url = os.environ.get("TEST_DATABASE_URL") or os.environ.get("DATABASE_URL")
+    if url:
+        parsed = urlparse(url)
+        host = parsed.hostname or "localhost"
+        port = str(parsed.port or 5432)
+        db = parsed.path.lstrip("/") or "lexireview"
+    else:
+        host, port, db = "localhost", "5432", "lexireview"
     return {
         "user": os.environ.get("POSTGRES_USER", "lexireview"),
         "password": os.environ.get("POSTGRES_PASSWORD", "lexireview_dev"),
-        "host": os.environ.get("POSTGRES_HOST", "localhost"),
-        "port": os.environ.get("POSTGRES_PORT", "5432"),
-        "db": os.environ.get("POSTGRES_DB", "lexireview"),
+        "host": host,
+        "port": port,
+        "db": db,
     }
 
 

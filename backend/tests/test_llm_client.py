@@ -1,11 +1,16 @@
-"""Tests for llm_client.py. This is a guardrail-and-config stub — no real
-provider call exists yet, so every path either refuses cleanly or raises
-NotImplementedError. No network access happens in these tests."""
+"""Tests for llm_client.py. Every provider except anthropic is a
+guardrail-and-config stub, so those paths refuse cleanly or raise
+NotImplementedError. anthropic has a real implementation, tested here
+against a fake client (types.SimpleNamespace stand-ins for the SDK's
+response objects) -- no network access happens in any of these tests."""
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
+import app.llm_client as llm_client
 from app.llm_client import (
     LLMClient,
     LLMClientError,
@@ -13,6 +18,8 @@ from app.llm_client import (
     ProviderNotConfiguredError,
     PseudonymisationRequiredError,
     SyntheticOnlyViolationError,
+    TEMPERATURE,
+    TIMEOUT_SECONDS,
 )
 
 
@@ -109,3 +116,105 @@ def test_config_from_env_parses_synthetic_only(monkeypatch, raw_value, expected)
     monkeypatch.setenv("SYNTHETIC_ONLY", raw_value)
     config = LLMConfig.from_env()
     assert config.synthetic_only is expected
+
+
+class _FakeAnthropicMessages:
+    def __init__(self, response):
+        self._response = response
+        self.received_kwargs: dict | None = None
+
+    def create(self, **kwargs):
+        self.received_kwargs = kwargs
+        return self._response
+
+
+class _FakeAnthropicClient:
+    """Stands in for anthropic.Anthropic — records constructor kwargs so
+    tests can assert on api_key/timeout/max_retries without any network
+    access, and returns a canned response from .messages.create()."""
+
+    def __init__(self, response=None, **kwargs):
+        self.init_kwargs = kwargs
+        self.messages = _FakeAnthropicMessages(response)
+
+
+def _tool_use_response(findings) -> SimpleNamespace:
+    return SimpleNamespace(
+        content=[SimpleNamespace(type="tool_use", name="record_findings", input={"findings": findings})]
+    )
+
+
+def test_anthropic_analyze_returns_findings_from_tool_use(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-test")
+    canned_findings = [
+        {
+            "category": "missing_clause",
+            "severity": "medium",
+            "block_ids": [],
+            "evidence_quote": "",
+            "explanation": "No termination clause found.",
+        }
+    ]
+    monkeypatch.setattr(
+        llm_client.anthropic,
+        "Anthropic",
+        lambda **kwargs: _FakeAnthropicClient(response=_tool_use_response(canned_findings), **kwargs),
+    )
+
+    client = LLMClient(_config(provider="anthropic", synthetic_only=False))
+    result = client.analyze([], pseudonymised=True, is_synthetic=False)
+
+    assert result == canned_findings
+
+
+def test_anthropic_analyze_uses_expected_call_params(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-test")
+    created = {}
+
+    def _fake_anthropic(**init_kwargs):
+        instance = _FakeAnthropicClient(response=_tool_use_response([]), **init_kwargs)
+        created["instance"] = instance
+        return instance
+
+    monkeypatch.setattr(llm_client.anthropic, "Anthropic", _fake_anthropic)
+
+    client = LLMClient(_config(provider="anthropic", model="claude-haiku", synthetic_only=False))
+    client.analyze([], pseudonymised=True, is_synthetic=False)
+
+    instance = created["instance"]
+    assert instance.init_kwargs["api_key"] == "fake-key-for-test"
+    assert instance.init_kwargs["timeout"] == TIMEOUT_SECONDS
+    assert instance.init_kwargs["max_retries"] == llm_client.ANTHROPIC_MAX_RETRIES
+
+    call_kwargs = instance.messages.received_kwargs
+    assert call_kwargs["model"] == "claude-haiku"
+    assert call_kwargs["temperature"] == TEMPERATURE
+    assert call_kwargs["tool_choice"] == {"type": "tool", "name": "record_findings"}
+
+
+def test_anthropic_analyze_raises_on_missing_tool_use_block(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-test")
+    empty_response = SimpleNamespace(content=[])
+    monkeypatch.setattr(
+        llm_client.anthropic, "Anthropic", lambda **kwargs: _FakeAnthropicClient(response=empty_response)
+    )
+
+    client = LLMClient(_config(provider="anthropic", synthetic_only=False))
+    with pytest.raises(LLMClientError) as exc_info:
+        client.analyze([], pseudonymised=True, is_synthetic=False)
+    assert exc_info.value.category == "provider_response_invalid"
+
+
+def test_anthropic_analyze_raises_on_non_list_findings(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-test")
+    bad_response = SimpleNamespace(
+        content=[SimpleNamespace(type="tool_use", name="record_findings", input={"findings": "not-a-list"})]
+    )
+    monkeypatch.setattr(
+        llm_client.anthropic, "Anthropic", lambda **kwargs: _FakeAnthropicClient(response=bad_response)
+    )
+
+    client = LLMClient(_config(provider="anthropic", synthetic_only=False))
+    with pytest.raises(LLMClientError) as exc_info:
+        client.analyze([], pseudonymised=True, is_synthetic=False)
+    assert exc_info.value.category == "provider_response_invalid"
