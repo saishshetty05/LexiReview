@@ -45,16 +45,17 @@ def verify_quote(source_text: str, quote: str) -> VerificationResult:
 
     if INCONSISTENCY_QUOTE_SEPARATOR in quote:
         spans = quote.split(INCONSISTENCY_QUOTE_SEPARATOR)
-        # CONTRACTS.md §2: inconsistency findings have EXACTLY 2 block_ids,
-        # i.e. exactly 2 conflicting spans. A malformed quote (the separator
-        # appearing more than once) is a caller bug, not a verification
-        # outcome to score — fail loud rather than silently verifying against
-        # an unexpected span count. A plain `assert` would be stripped under
-        # Python's -O flag, silently disabling this check, so raise instead.
+        # Splitting itself never raises -- the separator appearing more than
+        # once is tolerated at the string level and min() below would happily
+        # degrade to a score for any span count. But CONTRACTS.md §2 means
+        # exactly 2 spans for an inconsistency quote, so a different count is
+        # a caller bug, not a shape worth scoring: treat it as unverified
+        # outright rather than trusting whatever min() produces for a
+        # malformed input. Fail-safe reading of the contract's "two spans"
+        # rule (constitution rule 6: never let a wrong-shaped quote pass as
+        # verified).
         if len(spans) != 2:
-            raise ValueError(
-                f"inconsistency evidence_quote must split into exactly 2 spans, got {len(spans)}"
-            )
+            return VerificationResult(verification="unverified", match_score=0.0)
     else:
         spans = [quote]
 
