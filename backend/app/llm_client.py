@@ -1,11 +1,15 @@
 """llm_client.py — provider-agnostic LLM client for the analysis lane.
 
-STUB: enforces every guardrail from CLAUDE.md rule 3 and defines the request/
-response shape, but does not call a real provider yet. The Anthropic Console
-workspace + API keys are still an open item (docs/DECISION_LOG.md, owner B),
-so a call that clears every guardrail raises ProviderNotConfiguredError
-(no key set) or NotImplementedError (key set, but no provider wiring exists
-yet) instead of making a network request.
+Enforces every guardrail from CLAUDE.md rule 3 before any provider dispatch.
+`anthropic` has a real implementation (see _analyze_anthropic): temperature
+0, 180s timeout, JSON-schema-constrained via forced tool use, retries via
+the SDK's built-in exponential backoff (PRD NFR "Reliability" section --
+no specific retry count is given there, so this matches the job-level
+policy of 3 for consistency). Other providers (e.g. gemini_free) remain
+STUBs: a call that clears every guardrail raises ProviderNotConfiguredError
+(no key set) or NotImplementedError (key set, no provider wiring exists).
+The Anthropic Console workspace + API keys are still an open item
+(docs/DECISION_LOG.md, owner B).
 """
 
 from __future__ import annotations
@@ -13,10 +17,14 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
+import anthropic
+
 from app.anchors import Block
 
 TEMPERATURE = 0
 TIMEOUT_SECONDS = 180
+ANTHROPIC_MAX_RETRIES = 3
+ANTHROPIC_MAX_TOKENS = 4096
 
 # CONTRACTS.md §2 — one finding object's shape; constrains provider output
 # once a real call is implemented.
@@ -49,6 +57,34 @@ FINDING_JSON_SCHEMA = {
     },
     "required": ["category", "severity", "block_ids", "evidence_quote", "explanation"],
 }
+
+# Wraps FINDING_JSON_SCHEMA as a forced tool call so Anthropic returns
+# already-parsed JSON matching the contract, instead of free-text that would
+# need a separate parse/validate step.
+_RECORD_FINDINGS_TOOL = {
+    "name": "record_findings",
+    "description": "Record every finding identified in the document.",
+    "input_schema": {
+        "type": "object",
+        "properties": {"findings": {"type": "array", "items": FINDING_JSON_SCHEMA}},
+        "required": ["findings"],
+    },
+}
+
+_SYSTEM_PROMPT = (
+    "You are a contract-review assistant. You are given a legal document "
+    "split into numbered blocks. Identify clauses that are risky, "
+    "inconsistent with another clause, or missing entirely, and report them "
+    "via the record_findings tool only -- do not respond in plain text. "
+    "Every evidence_quote must be copied VERBATIM from the block text you "
+    "were given: do not paraphrase, fix typos, or change whitespace. "
+    "block_ids must reference the [BLOCK_n] labels you were given."
+)
+
+
+def _blocks_to_prompt(blocks: list[Block]) -> str:
+    return "\n\n".join(f"[{block.id}]\n{block.text}" for block in blocks)
+
 
 # Providers whose free tier may use submitted data for training (CLAUDE.md
 # rule 3): SYNTHETIC_ONLY must be enforced for these, never for paid tiers.
@@ -89,6 +125,16 @@ class ProviderNotConfiguredError(LLMClientError):
         super().__init__(
             "provider_not_configured", f"no API key configured for provider {provider!r}"
         )
+
+
+class ProviderResponseError(LLMClientError):
+    """The provider replied, but not in the shape record_findings requires.
+    Message is a fixed, generic string -- never the response body itself
+    (CLAUDE.md rule 2: response content, including on error paths, is never
+    logged or otherwise surfaced)."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__("provider_response_invalid", detail)
 
 
 @dataclass(frozen=True)
@@ -142,10 +188,42 @@ class LLMClient:
             raise LLMClientError(
                 "unknown_provider", f"no client implementation for provider {self.config.provider!r}"
             )
-        if not os.environ.get(api_key_env):
+        api_key = os.environ.get(api_key_env)
+        if not api_key:
             raise ProviderNotConfiguredError(self.config.provider)
+
+        if self.config.provider == "anthropic":
+            return self._analyze_anthropic(blocks, api_key)
 
         raise NotImplementedError(
             f"LLMClient stub: {self.config.provider!r} guardrails passed but no provider "
             "call is wired up yet"
         )
+
+    def _analyze_anthropic(self, blocks: list[Block], api_key: str) -> list[dict]:
+        client = anthropic.Anthropic(
+            api_key=api_key,
+            timeout=TIMEOUT_SECONDS,
+            # SDK-native exponential backoff on transient errors (connection,
+            # timeout, 429, 5xx) -- see module docstring for why this isn't a
+            # hand-rolled retry loop.
+            max_retries=ANTHROPIC_MAX_RETRIES,
+        )
+        response = client.messages.create(
+            model=self.config.model,
+            max_tokens=ANTHROPIC_MAX_TOKENS,
+            temperature=TEMPERATURE,
+            system=_SYSTEM_PROMPT,
+            tools=[_RECORD_FINDINGS_TOOL],
+            tool_choice={"type": "tool", "name": "record_findings"},
+            messages=[{"role": "user", "content": _blocks_to_prompt(blocks)}],
+        )
+
+        for content_block in response.content:
+            if content_block.type == "tool_use" and content_block.name == "record_findings":
+                findings = content_block.input.get("findings")
+                if not isinstance(findings, list):
+                    raise ProviderResponseError("record_findings.findings was not a list")
+                return findings
+
+        raise ProviderResponseError("no record_findings tool_use block in provider response")
