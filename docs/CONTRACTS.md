@@ -130,6 +130,21 @@ the UI must render them in a visually distinct "Unverified — quote could not b
 matched to the document" section. They count in the findings total. They are never
 exported as verified.
 
+## 1a. Document synthetic flag (v1.3)
+
+`documents.is_synthetic boolean NOT NULL DEFAULT FALSE` — a property of the
+document itself, recorded at ingestion (not derived or set at analysis time).
+
+DECIDED — default is `FALSE`, deliberately fail-closed: an untagged document
+is treated as real. This means the free-tier `SYNTHETIC_ONLY` gate (CLAUDE.md
+rule 3) refuses it by default rather than admitting it by default. Test
+fixtures that need a synthetic document must set `is_synthetic = TRUE`
+explicitly — there is no implicit synthetic path. Hardcoding `is_synthetic =
+TRUE` anywhere in the LLM client / analysis lane at analysis time was
+considered and rejected: that would make the flag fail-open (silently
+treating everything as synthetic if the column were ever missed or
+misread), the opposite of what rule 3 requires.
+
 ## 4. Document storage (v1.2)
 
 `backend/app/storage.py` is the lane-boundary interface between the ingestion
@@ -189,3 +204,6 @@ from an existing `documents` row with no schema change (see
 - v1.2 (2026-07-17): added §4, document storage (`fetch_document` signature +
   error semantics, deterministic key convention). No changes to any prior
   section.
+- v1.3 (2026-07-18): added §1a, `documents.is_synthetic` (fail-closed default
+  `FALSE`). Migration 002 adds the column plus the `document_summaries` table
+  locked in §2b. No changes to any prior section.
