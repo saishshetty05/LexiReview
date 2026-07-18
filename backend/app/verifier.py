@@ -45,6 +45,17 @@ def verify_quote(source_text: str, quote: str) -> VerificationResult:
 
     if INCONSISTENCY_QUOTE_SEPARATOR in quote:
         spans = quote.split(INCONSISTENCY_QUOTE_SEPARATOR)
+        # Splitting itself never raises -- the separator appearing more than
+        # once is tolerated at the string level and min() below would happily
+        # degrade to a score for any span count. But CONTRACTS.md §2 means
+        # exactly 2 spans for an inconsistency quote, so a different count is
+        # a caller bug, not a shape worth scoring: treat it as unverified
+        # outright rather than trusting whatever min() produces for a
+        # malformed input. Fail-safe reading of the contract's "two spans"
+        # rule (constitution rule 6: never let a wrong-shaped quote pass as
+        # verified).
+        if len(spans) != 2:
+            return VerificationResult(verification="unverified", match_score=0.0)
     else:
         spans = [quote]
 

@@ -73,3 +73,19 @@ def test_inconsistency_verification_uses_weakest_span():
     )
     result = verify_quote(SOURCE, quote)
     assert result.match_score < FUZZY_MATCH_THRESHOLD
+
+
+def test_inconsistency_quote_with_more_than_two_spans_is_unverified():
+    """CONTRACTS.md §2: inconsistency findings have EXACTLY 2 block_ids, i.e.
+    exactly 2 conflicting spans. A quote where the separator appears more
+    than once is a caller bug, not a shape worth scoring -- fail-safe
+    reading of the contract: unverified outright, not min()-scored against
+    an unexpected span count, and not a raised exception either."""
+    quote = (
+        "The monthly rent shall be Rs. 50,000 [...] "
+        "monthly rent of Rs. 60,000 effective from the second year [...] "
+        "a third, unexpected span"
+    )
+    result = verify_quote(SOURCE, quote)
+    assert result.verification == "unverified"
+    assert result.match_score == 0.0
