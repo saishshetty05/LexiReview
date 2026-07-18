@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from sqlalchemy import (
     JSON,
     BigInteger,
+    Boolean,
     DateTime,
     ForeignKey,
     Integer,
@@ -55,6 +56,32 @@ class Document(Base):
     file_type: Mapped[str] = mapped_column(String, nullable=False)
     page_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # CONTRACTS.md §1a (v1.3): fail-closed default FALSE — untagged documents
+    # are treated as real, so free-tier SYNTHETIC_ONLY gates refuse them.
+    # Test fixtures must set this TRUE explicitly.
+    is_synthetic: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
+class DocumentSummary(Base):
+    """One row per (doc_version_hash, model_version), per CONTRACTS.md §2b.
+    Written once by the worker after analysis completes; never updated
+    afterward (app_user is granted INSERT/SELECT only — see migration 002).
+    """
+
+    __tablename__ = "document_summaries"
+    __table_args__ = (
+        UniqueConstraint(
+            "doc_version_hash", "model_version", name="uq_document_summaries_hash_model"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+    doc_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    doc_version_hash: Mapped[str] = mapped_column(String, nullable=False)
+    model_version: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[dict] = mapped_column(JSON().with_variant(JSONB(), "postgresql"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
