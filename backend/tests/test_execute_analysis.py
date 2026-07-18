@@ -117,6 +117,16 @@ def _make_job(
     )
 
 
+def _stub_llm_client(monkeypatch) -> None:
+    """_execute_analysis constructs LLMClient() before calling run_analysis,
+    which normally requires LLM_PROVIDER/LLM_MODEL to be set (LLMConfig.from_env).
+    These tests fake run_analysis entirely, so the LLMClient instance itself
+    is never used -- stub the constructor too rather than depend on real env
+    config that CI has no reason to set just for these tests.
+    """
+    monkeypatch.setattr(worker, "LLMClient", lambda: object())
+
+
 FINDING = {
     "category": "missing_clause",
     "severity": "medium",
@@ -141,6 +151,7 @@ def test_execute_analysis_persists_findings_as_analysis_results(
 
     monkeypatch.setattr(worker, "fetch_document", lambda *a, **k: b"synthetic contract bytes")
     monkeypatch.setattr(worker, "run_analysis", lambda *a, **k: [dict(FINDING)])
+    _stub_llm_client(monkeypatch)
 
     job = _make_job(pg_owner_engine, user_id=user_id, doc_id=doc_id, doc_version_hash=doc_version_hash)
     worker._execute_analysis(job)
@@ -191,6 +202,7 @@ def test_execute_analysis_passes_is_synthetic_from_the_document_row(
 
     monkeypatch.setattr(worker, "fetch_document", lambda *a, **k: b"bytes")
     monkeypatch.setattr(worker, "run_analysis", _fake_run_analysis)
+    _stub_llm_client(monkeypatch)
 
     job = _make_job(pg_owner_engine, user_id=user_id, doc_id=doc_id, doc_version_hash=doc_version_hash)
     worker._execute_analysis(job)
@@ -240,6 +252,7 @@ def test_execute_analysis_wraps_transient_anthropic_errors(
 
     monkeypatch.setattr(worker, "fetch_document", lambda *a, **k: b"bytes")
     monkeypatch.setattr(worker, "run_analysis", _raise)
+    _stub_llm_client(monkeypatch)
 
     job = _make_job(pg_owner_engine, user_id=user_id, doc_id=doc_id, doc_version_hash=doc_version_hash)
     with pytest.raises(TransientAnalysisError) as exc_info:
