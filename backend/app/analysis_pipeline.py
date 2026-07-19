@@ -13,9 +13,11 @@ from __future__ import annotations
 
 from app.anchors import make_anchors
 from app.extraction import extract_text
-from app.llm_client import LLMClient
+from app.llm_client import REQUIRED_NO_ISSUES_PHRASE, LLMClient
 from app.pii_gateway import pseudonymise
 from app.verifier import verify_quote
+
+_RISK_SEVERITIES = ("high", "medium", "low", "info")
 
 
 def run_analysis(
@@ -36,6 +38,56 @@ def run_analysis(
 
     raw_findings = llm_client.analyze(blocks, pseudonymised=True, is_synthetic=is_synthetic)
     return [_finalize_finding(pseudonymised.text, finding) for finding in raw_findings]
+
+
+def run_summary(
+    file_bytes: bytes,
+    file_type: str,
+    llm_client: LLMClient,
+    findings: list[dict],
+    *,
+    is_synthetic: bool,
+) -> dict:
+    """Extract, redact, anchor, and summarize. Returns a payload dict
+    matching CONTRACTS.md §2c: `overview`/`key_terms` come from the LLM,
+    `risk_snapshot` is computed here from `findings` (already produced by
+    run_analysis for the same job) -- never LLM-authored, so the summary
+    can never disagree with the findings that back it.
+
+    Re-extracts/re-anchors rather than reusing run_analysis's intermediate
+    blocks: this keeps run_summary a standalone, independently testable
+    function taking the same "bytes + LLMClient" seam as run_analysis, at
+    the cost of redoing deterministic extraction work worker.py's caller
+    already paid for once.
+    """
+    extraction = extract_text(file_bytes, file_type)
+    pseudonymised = pseudonymise(extraction.text)
+    blocks = make_anchors(pseudonymised.text)
+
+    raw_summary = llm_client.summarize(blocks, pseudonymised=True, is_synthetic=is_synthetic)
+    risk_snapshot = _compute_risk_snapshot(findings)
+
+    overview = raw_summary["overview"]
+    if not any(risk_snapshot.values()):
+        # CONTRACTS.md §2c: deterministic override, not a hope the model
+        # phrased it correctly -- rule 7 can't depend on the LLM behaving,
+        # the same principle _finalize_finding applies to verification.
+        overview = REQUIRED_NO_ISSUES_PHRASE
+
+    return {
+        "overview": overview,
+        "key_terms": raw_summary["key_terms"],
+        "risk_snapshot": risk_snapshot,
+    }
+
+
+def _compute_risk_snapshot(findings: list[dict]) -> dict:
+    snapshot = {severity: 0 for severity in _RISK_SEVERITIES}
+    for finding in findings:
+        severity = finding.get("severity")
+        if severity in snapshot:
+            snapshot[severity] += 1
+    return snapshot
 
 
 def _finalize_finding(source_text: str, finding: dict) -> dict:

@@ -7,17 +7,19 @@ from __future__ import annotations
 
 import io
 
-from app.analysis_pipeline import run_analysis
+from app.analysis_pipeline import run_analysis, run_summary
+from app.llm_client import REQUIRED_NO_ISSUES_PHRASE
 
 
 class _FakeLLMClient:
-    """Stands in for a real provider call: returns canned findings and
-    records what it was invoked with, so tests can assert the pipeline
+    """Stands in for a real provider call: returns canned findings/summary
+    and records what it was invoked with, so tests can assert the pipeline
     redacted PII before anchoring and passed guardrail flags through
     correctly."""
 
-    def __init__(self, findings: list[dict]) -> None:
-        self._findings = findings
+    def __init__(self, findings: list[dict] | None = None, summary: dict | None = None) -> None:
+        self._findings = findings if findings is not None else []
+        self._summary = summary or {"overview": "A lease agreement.", "key_terms": []}
         self.received_blocks = None
         self.received_kwargs: dict | None = None
 
@@ -25,6 +27,11 @@ class _FakeLLMClient:
         self.received_blocks = blocks
         self.received_kwargs = {"pseudonymised": pseudonymised, "is_synthetic": is_synthetic}
         return self._findings
+
+    def summarize(self, blocks, *, pseudonymised, is_synthetic):
+        self.received_blocks = blocks
+        self.received_kwargs = {"pseudonymised": pseudonymised, "is_synthetic": is_synthetic}
+        return self._summary
 
 
 def _make_docx_bytes(paragraphs: list[str]) -> bytes:
@@ -150,3 +157,76 @@ def test_original_finding_dicts_passed_by_caller_are_not_mutated():
 
     assert "verification" not in original
     assert "confidence" not in original
+
+
+# ── run_summary() ────────────────────────────────────────────────────────
+
+
+def test_run_summary_computes_risk_snapshot_from_findings_not_the_llm():
+    file_bytes = _make_docx_bytes(LEASE_PARAGRAPHS)
+    findings = [
+        {**INCONSISTENCY_FINDING, "severity": "high"},
+        {**MISSING_CLAUSE_FINDING, "severity": "medium"},
+        {"category": "liability", "severity": "medium", "block_ids": [], "evidence_quote": "", "explanation": ""},
+    ]
+    fake_llm = _FakeLLMClient(summary={"overview": "A lease agreement.", "key_terms": []})
+
+    result = run_summary(file_bytes, "docx", fake_llm, findings, is_synthetic=True)
+
+    assert result["risk_snapshot"] == {"high": 1, "medium": 2, "low": 0, "info": 0}
+
+
+def test_run_summary_preserves_llm_overview_when_findings_exist():
+    file_bytes = _make_docx_bytes(LEASE_PARAGRAPHS)
+    findings = [{**INCONSISTENCY_FINDING, "severity": "high"}]
+    fake_llm = _FakeLLMClient(summary={"overview": "A lease with a rent inconsistency.", "key_terms": []})
+
+    result = run_summary(file_bytes, "docx", fake_llm, findings, is_synthetic=True)
+
+    assert result["overview"] == "A lease with a rent inconsistency."
+
+
+def test_run_summary_overrides_overview_to_required_phrase_on_clean_document():
+    """CONTRACTS.md §2c bench requirement: a genuinely clean synthetic
+    contract (no findings) must get the exact required phrase, regardless
+    of whatever the LLM actually said -- the override is deterministic, not
+    a hope the model phrased the empty case correctly."""
+    file_bytes = _make_docx_bytes(LEASE_PARAGRAPHS)
+    fake_llm = _FakeLLMClient(
+        findings=[], summary={"overview": "This is a perfectly ordinary lease.", "key_terms": []}
+    )
+
+    result = run_summary(file_bytes, "docx", fake_llm, findings=[], is_synthetic=True)
+
+    assert result["overview"] == REQUIRED_NO_ISSUES_PHRASE
+    assert result["risk_snapshot"] == {"high": 0, "medium": 0, "low": 0, "info": 0}
+
+
+def test_run_summary_includes_key_terms_from_llm():
+    file_bytes = _make_docx_bytes(LEASE_PARAGRAPHS)
+    key_terms = [{"label": "monthly_rent", "detail": "Rs. 50,000"}]
+    fake_llm = _FakeLLMClient(summary={"overview": "A lease agreement.", "key_terms": key_terms})
+
+    result = run_summary(file_bytes, "docx", fake_llm, findings=[], is_synthetic=True)
+
+    assert result["key_terms"] == key_terms
+
+
+def test_run_summary_llm_client_receives_pseudonymised_true_and_the_synthetic_flag():
+    file_bytes = _make_docx_bytes(LEASE_PARAGRAPHS)
+    fake_llm = _FakeLLMClient()
+
+    run_summary(file_bytes, "docx", fake_llm, findings=[], is_synthetic=False)
+
+    assert fake_llm.received_kwargs == {"pseudonymised": True, "is_synthetic": False}
+
+
+def test_run_summary_pii_is_redacted_before_the_llm_ever_sees_it():
+    file_bytes = _make_docx_bytes(LEASE_PARAGRAPHS)
+    fake_llm = _FakeLLMClient()
+
+    run_summary(file_bytes, "docx", fake_llm, findings=[], is_synthetic=True)
+
+    block_texts = " ".join(block.text for block in fake_llm.received_blocks)
+    assert "owner@example.com" not in block_texts
+    assert "[REDACTED_EMAIL]" in block_texts

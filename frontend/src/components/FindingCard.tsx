@@ -15,7 +15,7 @@ export function FindingCard({ finding }: { finding: Finding }) {
     >
       {isUnverified && (
         <p className="mb-3 inline-block rounded bg-amber-500 px-2 py-1 text-xs font-bold uppercase tracking-wide text-white">
-          Unverified — quote could not be matched to the source
+          Unverified — quote could not be matched to the document
         </p>
       )}
 
