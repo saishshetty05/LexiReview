@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    branches: [main]
 
 jobs:
   ci:
@@ -32,6 +33,7 @@ jobs:
       POSTGRES_HOST: localhost
       POSTGRES_PORT: "5432"
       DATABASE_URL: postgresql://lexireview:lexireview_dev@localhost:5432/lexireview
+      JWT_SECRET: ci_test_jwt_secret_not_a_real_secret_at_least_32_bytes_long_padding
       # CI-only app_user password for migration 001 (backend/alembic/versions);
       # not a real secret, never used outside the ephemeral CI service container.
       # Distinct from POSTGRES_PASSWORD (the owner/superuser role) above.
