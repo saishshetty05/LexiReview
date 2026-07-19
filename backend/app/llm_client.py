@@ -81,6 +81,71 @@ _SYSTEM_PROMPT = (
     "block_ids must reference the [BLOCK_n] labels you were given."
 )
 
+# CONTRACTS.md §2c — document_summaries.payload shape (partial: overview +
+# key_terms come from the provider; risk_snapshot is computed deterministically
+# in analysis_pipeline.py from the findings run_analysis already produced,
+# never LLM-authored).
+SUMMARY_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "overview": {"type": "string"},
+        "key_terms": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "label": {"type": "string"},
+                    "detail": {"type": "string"},
+                },
+                "required": ["label", "detail"],
+            },
+        },
+    },
+    "required": ["overview", "key_terms"],
+}
+
+_RECORD_SUMMARY_TOOL = {
+    "name": "record_summary",
+    "description": "Record the document's plain-language overview and key terms.",
+    "input_schema": SUMMARY_JSON_SCHEMA,
+}
+
+_SUMMARY_SYSTEM_PROMPT = (
+    "You are a contract-review assistant. You are given a legal document "
+    "split into numbered blocks. Write a 2-4 sentence plain-language "
+    "overview of what the document is and what it covers, and list its key "
+    "terms (e.g. notice period, payment terms, governing law) via the "
+    "record_summary tool only -- do not respond in plain text. "
+    "You must NEVER characterize the document, or any part of it, as safe, "
+    "risk-free, clean, or free of concerns -- that judgment belongs to a "
+    "human reviewer, not you."
+)
+
+# CONTRACTS.md §2c rule-7 guardrail: case-insensitive substring match, same
+# pattern-matching approach as pii_gateway.py. Checked against the provider's
+# overview text before it is ever stored.
+_FORBIDDEN_SAFETY_PHRASES = (
+    "safe",
+    "risk-free",
+    "riskfree",
+    "clean",
+    "no concerns",
+    "no risk",
+    "worry-free",
+    "nothing to worry about",
+)
+
+# CONTRACTS.md §2c: the exact phrase analysis_pipeline.py substitutes for
+# `overview` when the deterministic risk_snapshot is entirely zero -- not a
+# paraphrase, and not something the provider is trusted to phrase correctly
+# on its own.
+REQUIRED_NO_ISSUES_PHRASE = "no issues detected by automated review"
+
+
+def _contains_forbidden_phrase(text: str) -> bool:
+    lowered = text.lower()
+    return any(phrase in lowered for phrase in _FORBIDDEN_SAFETY_PHRASES)
+
 
 def _blocks_to_prompt(blocks: list[Block]) -> str:
     return "\n\n".join(f"[{block.id}]\n{block.text}" for block in blocks)
@@ -137,6 +202,19 @@ class ProviderResponseError(LLMClientError):
         super().__init__("provider_response_invalid", detail)
 
 
+class SummaryGuardrailViolationError(LLMClientError):
+    """CONTRACTS.md §2c / CLAUDE.md rule 7: the model characterized the
+    document as safe/risk-free/clean/etc, which is not its call to make.
+    Category + a fixed message only -- never the offending text itself
+    (rule 2 applies to guardrail refusals the same as any other error)."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "summary_guardrail_violation",
+            "summary overview used forbidden safety-characterizing language",
+        )
+
+
 @dataclass(frozen=True)
 class LLMConfig:
     provider: str
@@ -166,13 +244,11 @@ class LLMClient:
     def __init__(self, config: LLMConfig | None = None) -> None:
         self.config = config or LLMConfig.from_env()
 
-    def analyze(
-        self,
-        blocks: list[Block],
-        *,
-        pseudonymised: bool,
-        is_synthetic: bool,
-    ) -> list[dict]:
+    def _resolve_api_key(self, *, pseudonymised: bool, is_synthetic: bool) -> str:
+        """Runs every CLAUDE.md rule 3 guardrail, in fixed order, and returns
+        the api_key to dispatch with. Shared by analyze() and summarize() --
+        both are provider calls and both must clear the same guardrails
+        regardless of what they ask the provider to do."""
         if not pseudonymised:
             raise PseudonymisationRequiredError()
 
@@ -191,9 +267,40 @@ class LLMClient:
         api_key = os.environ.get(api_key_env)
         if not api_key:
             raise ProviderNotConfiguredError(self.config.provider)
+        return api_key
+
+    def analyze(
+        self,
+        blocks: list[Block],
+        *,
+        pseudonymised: bool,
+        is_synthetic: bool,
+    ) -> list[dict]:
+        api_key = self._resolve_api_key(pseudonymised=pseudonymised, is_synthetic=is_synthetic)
 
         if self.config.provider == "anthropic":
             return self._analyze_anthropic(blocks, api_key)
+
+        raise NotImplementedError(
+            f"LLMClient stub: {self.config.provider!r} guardrails passed but no provider "
+            "call is wired up yet"
+        )
+
+    def summarize(
+        self,
+        blocks: list[Block],
+        *,
+        pseudonymised: bool,
+        is_synthetic: bool,
+    ) -> dict:
+        """Returns {"overview": str, "key_terms": [{"label", "detail"}]} --
+        the LLM-authored part of CONTRACTS.md §2c's payload. risk_snapshot is
+        not this method's concern; analysis_pipeline.run_summary computes it
+        deterministically from findings and owns the rule-7 override."""
+        api_key = self._resolve_api_key(pseudonymised=pseudonymised, is_synthetic=is_synthetic)
+
+        if self.config.provider == "anthropic":
+            return self._summarize_anthropic(blocks, api_key)
 
         raise NotImplementedError(
             f"LLMClient stub: {self.config.provider!r} guardrails passed but no provider "
@@ -227,3 +334,31 @@ class LLMClient:
                 return findings
 
         raise ProviderResponseError("no record_findings tool_use block in provider response")
+
+    def _summarize_anthropic(self, blocks: list[Block], api_key: str) -> dict:
+        client = anthropic.Anthropic(
+            api_key=api_key,
+            timeout=TIMEOUT_SECONDS,
+            max_retries=ANTHROPIC_MAX_RETRIES,
+        )
+        response = client.messages.create(
+            model=self.config.model,
+            max_tokens=ANTHROPIC_MAX_TOKENS,
+            temperature=TEMPERATURE,
+            system=_SUMMARY_SYSTEM_PROMPT,
+            tools=[_RECORD_SUMMARY_TOOL],
+            tool_choice={"type": "tool", "name": "record_summary"},
+            messages=[{"role": "user", "content": _blocks_to_prompt(blocks)}],
+        )
+
+        for content_block in response.content:
+            if content_block.type == "tool_use" and content_block.name == "record_summary":
+                overview = content_block.input.get("overview")
+                key_terms = content_block.input.get("key_terms")
+                if not isinstance(overview, str) or not isinstance(key_terms, list):
+                    raise ProviderResponseError("record_summary input did not match the expected shape")
+                if _contains_forbidden_phrase(overview):
+                    raise SummaryGuardrailViolationError()
+                return {"overview": overview, "key_terms": key_terms}
+
+        raise ProviderResponseError("no record_summary tool_use block in provider response")
