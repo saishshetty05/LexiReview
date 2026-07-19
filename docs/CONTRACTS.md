@@ -89,9 +89,9 @@ Closes the 2026-07-15 OPEN item: "storage location for the document summary
 DECIDED — storage: a new `document_summaries` table, one row per
 `(doc_version_hash, model_version)`. Columns: id uuid PK · user_id uuid FK
 (denormalized for RLS, same pattern as `analysis_results`) · doc_id uuid FK ·
-doc_version_hash text · model_version text · payload JSONB (summary content
-shape is B's to define; out of scope here) · created_at timestamptz. Written
-once by the worker after analysis completes; never updated afterward.
+doc_version_hash text · model_version text · payload JSONB (shape locked in
+§2c, v1.4) · created_at timestamptz. Written once by the worker after
+analysis completes; never updated afterward.
 
 A nullable column on `documents` was considered and rejected: app_user has no
 UPDATE grant on `documents` (immutability grants, migration 001), so a
@@ -114,6 +114,68 @@ already establishes for findings.
 
 Migration for the table itself lands separately, in Person A's schema lane,
 alongside the next schema change — this section locks the shape only.
+
+## 2c. Document summary payload + generation rules (v1.4)
+
+Closes the "payload content shape is B's to define; out of scope here"
+placeholder left in §2b.
+
+DECIDED — payload shape:
+
+```json
+{
+  "overview": "2-4 sentence plain-language summary",
+  "key_terms": [{"label": "notice_period", "detail": "30 days written notice required"}],
+  "risk_snapshot": {"high": 0, "medium": 0, "low": 0, "info": 0}
+}
+```
+
+- `overview`: 2-4 sentence plain-language summary, produced by a forced-tool
+  LLM call (`record_summary`) separate from the `record_findings` call in §2.
+  Two small deterministic forced-tool calls were chosen over one combined
+  call: determinism outweighs the round-trip savings, and this runs once per
+  document, not once per request.
+- `key_terms`: array of `{label, detail}` pairs from the same LLM call (e.g.
+  notice period, payment terms, governing law). The exact set of terms
+  surfaced is prompt-driven, not enumerated here.
+- `risk_snapshot`: `{"high", "medium", "low", "info"}` finding counts. NOT
+  LLM-authored — computed deterministically in code from the findings
+  `run_analysis` already produced for the same job. Same principle as
+  `verify_quote` owning verification in §2: one layer that can lie about the
+  document's risk is enough.
+
+DECIDED — constitution rule 7 guardrail (the UI never says a document is
+"safe"): the summary system prompt forbids the model from characterizing the
+document as safe, risk-free, clean, or similar, regardless of
+`risk_snapshot`. Forbidden phrases (case-insensitive substring match, same
+pattern-matching approach as `pii_gateway.py`): `safe`, `risk-free`,
+`riskfree`, `clean`, `no concerns`, `no risk`, `worry-free`, `nothing to
+worry about`. When `risk_snapshot` is entirely zero, `overview` MUST use the
+exact phrase `"no issues detected by automated review"` — not a paraphrase.
+This is a testable behavior: the summary test suite includes a genuinely
+clean synthetic contract and asserts the overview contains none of the
+forbidden phrases and, when `risk_snapshot` is empty, contains the required
+phrase verbatim.
+
+DECIDED — worker trigger: summary generation runs in the worker after
+`_execute_analysis` writes findings, before the job transitions to
+`succeeded`. Failure is non-fatal to the job — findings are the primary
+output, the summary is supplementary — so a summary-generation failure does
+not fail the job or block `succeeded`. The failure is recorded in a new
+nullable `analysis_jobs.summary_error` column (same `"category: message"`
+format as the existing `error_reason` column), written in the same worker
+`UPDATE` that sets the job's terminal state. A separate
+`document_summary_attempts` table was considered and rejected: there is no
+retry policy or multi-attempt history for summary generation to justify a
+new immutable audit table — it is a single best-effort attempt per job, not
+a first-class tracked entity.
+
+DECIDED — endpoint ownership: `GET /documents/{id}/summary` (locked in §2b)
+is Person A's, built in a follow-up PR after the summary-write path lands,
+using the same `get_current_user` dependency pattern the jobs routes now use.
+
+Migration for `analysis_jobs.summary_error` lands in Person A's schema lane,
+alongside the endpoint PR.
 
 ## 3. Boundary behaviors
 
@@ -207,3 +269,9 @@ from an existing `documents` row with no schema change (see
 - v1.3 (2026-07-18): added §1a, `documents.is_synthetic` (fail-closed default
   `FALSE`). Migration 002 adds the column plus the `document_summaries` table
   locked in §2b. No changes to any prior section.
+- v1.4 (2026-07-19): added §2c, closing the §2b payload-shape placeholder —
+  `document_summaries.payload` shape, the rule-7 forbidden-phrases guardrail
+  for the summary prompt, and the worker-trigger/failure-recording decision
+  (`analysis_jobs.summary_error`, nullable). `GET /documents/{id}/summary`
+  (§2b) confirmed as Person A's, built after the summary-write path lands.
+  No changes to any prior section.
