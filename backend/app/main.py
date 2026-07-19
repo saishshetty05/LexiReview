@@ -5,6 +5,7 @@ routes are B's. Same file, don't pull each other's in-progress branches.
 """
 from __future__ import annotations
 
+import os
 import uuid
 from typing import Iterator
 
@@ -24,7 +25,7 @@ from app.auth import (
     register,
 )
 from app.db import app_user_session
-from app.models import AnalysisJob, AnalysisResult, DocumentSummary, User
+from app.models import AnalysisJob, AnalysisResult, Document, DocumentSummary, User
 
 app = FastAPI(title="LexiReview API")
 
@@ -202,28 +203,50 @@ def get_job_findings(
 def get_document_summary(
     document_id: uuid.UUID, current: tuple[User, Session] = Depends(get_current_user)
 ) -> dict:
-    """CONTRACTS.md §2b/§2c. Same anti-enumeration 404 as get_job: RLS (the
-    app_user_session opened by get_current_user) scopes document_summaries
-    to the caller, so a nonexistent document_id and one owned by someone
-    else both produce zero visible rows -- one branch, one 404.
+    """CONTRACTS.md §2b: "the document's current version and the pinned
+    model_version." Two-step lookup, both RLS-scoped through the same
+    session:
 
-    A document_id can have multiple document_summaries rows (one per
-    (doc_version_hash, model_version) -- a re-upload or a model_version
-    change each add a row, none are ever overwritten). Ordering by
-    created_at desc and taking the first is a deliberate choice: the
-    reviewer should see the most recent analysis, not an arbitrary or
-    historical one.
+    1. Resolve the CURRENT version of document_id (highest `version`,
+       documents.doc_id/version pair is immutable per row -- CLAUDE.md rule
+       9 -- so "current" just means most recent version row). This step is
+       also the anti-enumeration 404: a nonexistent document_id and one
+       owned by someone else both produce zero visible rows via RLS -- one
+       branch, one 404, same pattern as get_job/storage.fetch_document.
+    2. Query document_summaries filtered to that version's doc_version_hash
+       -- NOT any doc_version_hash ever seen for this doc_id. A prior
+       version without a matching bugfix here would silently serve a STALE
+       summary after a re-upload that hasn't been re-analyzed yet (caught
+       in PR #33 review). If LLM_MODEL is set, also filter to that pinned
+       model_version, per the contract wording; if unset (e.g. a dev
+       environment before the Console key exists), fall back to the most
+       recent summary at that hash by created_at -- documented here rather
+       than silently picking an arbitrary row.
     """
     _user, session = current
-    summary = (
+    current_version = (
         session.execute(
-            select(DocumentSummary)
-            .where(DocumentSummary.doc_id == document_id)
-            .order_by(DocumentSummary.created_at.desc())
+            select(Document)
+            .where(Document.doc_id == document_id)
+            .order_by(Document.version.desc())
         )
         .scalars()
         .first()
     )
+    if current_version is None:
+        raise HTTPException(status_code=404, detail="document summary not found")
+
+    summary_query = select(DocumentSummary).where(
+        DocumentSummary.doc_version_hash == current_version.doc_version_hash
+    )
+    pinned_model_version = os.environ.get("LLM_MODEL")
+    if pinned_model_version:
+        summary_query = summary_query.where(
+            DocumentSummary.model_version == pinned_model_version
+        )
+    summary_query = summary_query.order_by(DocumentSummary.created_at.desc())
+
+    summary = session.execute(summary_query).scalars().first()
     if summary is None:
         raise HTTPException(status_code=404, detail="document summary not found")
     return summary.payload
