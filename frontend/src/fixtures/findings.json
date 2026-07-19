@@ -1,0 +1,56 @@
+[
+  {
+    "category": "inconsistency",
+    "severity": "high",
+    "block_ids": ["BLOCK_4", "BLOCK_19"],
+    "evidence_quote": "the monthly rent shall be Rs. 50,000 [...] a monthly rent of Rs. 60,000",
+    "explanation": "Clause 3 (BLOCK_4) states monthly rent of Rs. 50,000, but clause 14 (BLOCK_19) states Rs. 60,000. These amounts conflict and one must be corrected before signing.",
+    "verification": "verified",
+    "confidence": "standard"
+  },
+  {
+    "category": "missing_clause",
+    "severity": "medium",
+    "block_ids": [],
+    "evidence_quote": "",
+    "explanation": "No force majeure clause was found. Without one, neither party has a defined process for excusing performance during events outside their control (e.g. natural disaster, government order).",
+    "verification": "verified",
+    "confidence": "standard"
+  },
+  {
+    "category": "auto_renewal",
+    "severity": "medium",
+    "block_ids": ["BLOCK_7"],
+    "evidence_quote": "This agreement shall automatically renew for successive one-year terms unless either party provides written notice of non-renewal at least 60 days prior to expiry.",
+    "explanation": "The auto-renewal clause requires action from the reviewing party well before expiry; missing the 60-day notice window will silently extend the agreement for another year.",
+    "verification": "verified",
+    "confidence": "standard"
+  },
+  {
+    "category": "indemnity",
+    "severity": "low",
+    "block_ids": ["BLOCK_11"],
+    "evidence_quote": "Each party shall indemnify the other against direct losses arising from a breach of this agreement.",
+    "explanation": "Indemnity is limited to direct losses only; consequential or indirect losses (e.g. lost profits) are not covered, which may be narrower than the reviewing party expects.",
+    "verification": "verified",
+    "confidence": "standard"
+  },
+  {
+    "category": "governing_law",
+    "severity": "info",
+    "block_ids": ["BLOCK_2"],
+    "evidence_quote": "This agreement shall be governed by the laws of the State of Delaware.",
+    "explanation": "Low severity by default, but material if either party expected local jurisdiction to apply -- severity reflects typical risk, not this clause's importance to a given reviewer.",
+    "verification": "verified",
+    "confidence": "standard"
+  },
+  {
+    "category": "termination",
+    "severity": "high",
+    "block_ids": ["BLOCK_22"],
+    "evidence_quote": "Either party may terminate this agreement for cause upon material breach that remains uncured after",
+    "explanation": "The termination-for-cause clause appears truncated in the source text; the exact cure period could not be confirmed against the document and should be checked manually.",
+    "verification": "unverified",
+    "confidence": "needs_review"
+  }
+]
