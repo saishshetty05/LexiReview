@@ -17,6 +17,7 @@ from app.llm_client import (
     LLMConfig,
     ProviderNotConfiguredError,
     PseudonymisationRequiredError,
+    SummaryGuardrailViolationError,
     SyntheticOnlyViolationError,
     TEMPERATURE,
     TIMEOUT_SECONDS,
@@ -218,3 +219,135 @@ def test_anthropic_analyze_raises_on_non_list_findings(monkeypatch):
     with pytest.raises(LLMClientError) as exc_info:
         client.analyze([], pseudonymised=True, is_synthetic=False)
     assert exc_info.value.category == "provider_response_invalid"
+
+
+# ── summarize() ──────────────────────────────────────────────────────────
+# Guardrails (pseudonymisation, synthetic-only, provider config) are shared
+# with analyze() via LLMClient._resolve_api_key -- these tests confirm
+# summarize() actually runs that shared path, not that the guardrails work
+# (already covered above).
+
+
+def test_summarize_unpseudonymised_payload_always_refused():
+    client = LLMClient(_config())
+    with pytest.raises(PseudonymisationRequiredError):
+        client.summarize([], pseudonymised=False, is_synthetic=True)
+
+
+def test_summarize_free_tier_provider_refuses_non_synthetic_when_synthetic_only():
+    client = LLMClient(_config(provider="gemini_free", synthetic_only=True))
+    with pytest.raises(SyntheticOnlyViolationError):
+        client.summarize([], pseudonymised=True, is_synthetic=False)
+
+
+def test_summarize_missing_api_key_raises_not_configured(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    client = LLMClient(_config(provider="anthropic", synthetic_only=False))
+    with pytest.raises(ProviderNotConfiguredError):
+        client.summarize([], pseudonymised=True, is_synthetic=False)
+
+
+def _summary_tool_use_response(overview: str, key_terms: list[dict]) -> SimpleNamespace:
+    return SimpleNamespace(
+        content=[
+            SimpleNamespace(
+                type="tool_use",
+                name="record_summary",
+                input={"overview": overview, "key_terms": key_terms},
+            )
+        ]
+    )
+
+
+def test_anthropic_summarize_returns_overview_and_key_terms(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-test")
+    key_terms = [{"label": "notice_period", "detail": "30 days written notice required"}]
+    monkeypatch.setattr(
+        llm_client.anthropic,
+        "Anthropic",
+        lambda **kwargs: _FakeAnthropicClient(
+            response=_summary_tool_use_response("A lease agreement between two parties.", key_terms),
+            **kwargs,
+        ),
+    )
+
+    client = LLMClient(_config(provider="anthropic", synthetic_only=False))
+    result = client.summarize([], pseudonymised=True, is_synthetic=False)
+
+    assert result == {"overview": "A lease agreement between two parties.", "key_terms": key_terms}
+
+
+def test_anthropic_summarize_uses_expected_call_params(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-test")
+    created = {}
+
+    def _fake_anthropic(**init_kwargs):
+        instance = _FakeAnthropicClient(
+            response=_summary_tool_use_response("overview", []), **init_kwargs
+        )
+        created["instance"] = instance
+        return instance
+
+    monkeypatch.setattr(llm_client.anthropic, "Anthropic", _fake_anthropic)
+
+    client = LLMClient(_config(provider="anthropic", model="claude-haiku", synthetic_only=False))
+    client.summarize([], pseudonymised=True, is_synthetic=False)
+
+    call_kwargs = created["instance"].messages.received_kwargs
+    assert call_kwargs["tool_choice"] == {"type": "tool", "name": "record_summary"}
+    assert call_kwargs["temperature"] == TEMPERATURE
+
+
+def test_anthropic_summarize_raises_on_missing_tool_use_block(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-test")
+    empty_response = SimpleNamespace(content=[])
+    monkeypatch.setattr(
+        llm_client.anthropic, "Anthropic", lambda **kwargs: _FakeAnthropicClient(response=empty_response)
+    )
+
+    client = LLMClient(_config(provider="anthropic", synthetic_only=False))
+    with pytest.raises(LLMClientError) as exc_info:
+        client.summarize([], pseudonymised=True, is_synthetic=False)
+    assert exc_info.value.category == "provider_response_invalid"
+
+
+def test_anthropic_summarize_raises_on_malformed_shape(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-test")
+    bad_response = SimpleNamespace(
+        content=[
+            SimpleNamespace(type="tool_use", name="record_summary", input={"overview": 123, "key_terms": []})
+        ]
+    )
+    monkeypatch.setattr(
+        llm_client.anthropic, "Anthropic", lambda **kwargs: _FakeAnthropicClient(response=bad_response)
+    )
+
+    client = LLMClient(_config(provider="anthropic", synthetic_only=False))
+    with pytest.raises(LLMClientError) as exc_info:
+        client.summarize([], pseudonymised=True, is_synthetic=False)
+    assert exc_info.value.category == "provider_response_invalid"
+
+
+@pytest.mark.parametrize(
+    "overview",
+    [
+        "This document is completely safe to sign.",
+        "The contract is risk-free for both parties.",
+        "Overall this is a clean agreement with no concerns.",
+    ],
+)
+def test_anthropic_summarize_rejects_forbidden_safety_language(monkeypatch, overview):
+    """CONTRACTS.md §2c / CLAUDE.md rule 7: the model must never characterize
+    the document as safe/risk-free/clean, even if it decides to on its own --
+    this is the defense-in-depth check behind the system-prompt instruction."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-test")
+    monkeypatch.setattr(
+        llm_client.anthropic,
+        "Anthropic",
+        lambda **kwargs: _FakeAnthropicClient(response=_summary_tool_use_response(overview, [])),
+    )
+
+    client = LLMClient(_config(provider="anthropic", synthetic_only=False))
+    with pytest.raises(SummaryGuardrailViolationError) as exc_info:
+        client.summarize([], pseudonymised=True, is_synthetic=False)
+    assert exc_info.value.category == "summary_guardrail_violation"
