@@ -24,7 +24,7 @@ from app.auth import (
     register,
 )
 from app.db import app_user_session
-from app.models import AnalysisJob, AnalysisResult, User
+from app.models import AnalysisJob, AnalysisResult, DocumentSummary, User
 
 app = FastAPI(title="LexiReview API")
 
@@ -196,3 +196,34 @@ def get_job_findings(
         key=lambda r: _SEVERITY_ORDER.get(r.severity, len(_SEVERITY_ORDER)),
     )
     return [r.payload for r in (*verified, *unverified)]
+
+
+@app.get("/documents/{document_id}/summary")
+def get_document_summary(
+    document_id: uuid.UUID, current: tuple[User, Session] = Depends(get_current_user)
+) -> dict:
+    """CONTRACTS.md §2b/§2c. Same anti-enumeration 404 as get_job: RLS (the
+    app_user_session opened by get_current_user) scopes document_summaries
+    to the caller, so a nonexistent document_id and one owned by someone
+    else both produce zero visible rows -- one branch, one 404.
+
+    A document_id can have multiple document_summaries rows (one per
+    (doc_version_hash, model_version) -- a re-upload or a model_version
+    change each add a row, none are ever overwritten). Ordering by
+    created_at desc and taking the first is a deliberate choice: the
+    reviewer should see the most recent analysis, not an arbitrary or
+    historical one.
+    """
+    _user, session = current
+    summary = (
+        session.execute(
+            select(DocumentSummary)
+            .where(DocumentSummary.doc_id == document_id)
+            .order_by(DocumentSummary.created_at.desc())
+        )
+        .scalars()
+        .first()
+    )
+    if summary is None:
+        raise HTTPException(status_code=404, detail="document summary not found")
+    return summary.payload
