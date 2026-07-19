@@ -61,22 +61,32 @@ SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
 
 @contextmanager
-def app_user_session(user_id: uuid.UUID) -> Iterator[Session]:
+def app_user_session(user_id: uuid.UUID | None) -> Iterator[Session]:
     """Open a session and apply `SET LOCAL app.user_id` for RLS scoping.
 
     Shared by every code path (API, worker) that reads/writes user-owned
     rows, so RLS is the single source of truth for row scoping instead of
     each caller remembering to add its own user_id filter. Commits on a
     clean exit, rolls back on any exception.
+
+    `user_id=None` skips the SET LOCAL entirely and leaves app.user_id
+    unset for the session. This is ONLY safe against a table/policy that
+    doesn't depend on app.user_id being set -- today that is exactly one
+    case, `users` SELECT under the email_lookup policy (migration 003),
+    used by login to find a row by email before any user_id is known. Every
+    other RLS policy in the schema hard-errors on an unset app.user_id
+    (see docs/DECISION_LOG.md, 2026-07-16) rather than silently scoping to
+    nothing, so passing None anywhere else will fail loudly, not leak rows.
     """
     session = SessionLocal()
     try:
-        # SET LOCAL, like CREATE ROLE, is DDL/config -- Postgres rejects bind
-        # parameters there ("syntax error at or near $1"). uuid.UUID(...) both
-        # validates the input and produces a string of only hex digits and
-        # hyphens, which is safe to inline directly (same pattern as
-        # backend/tests/test_rls_smoke.py).
-        session.execute(text(f"SET LOCAL app.user_id = '{uuid.UUID(str(user_id))}'"))
+        if user_id is not None:
+            # SET LOCAL, like CREATE ROLE, is DDL/config -- Postgres rejects
+            # bind parameters there ("syntax error at or near $1").
+            # uuid.UUID(...) both validates the input and produces a string
+            # of only hex digits and hyphens, which is safe to inline
+            # directly (same pattern as backend/tests/test_rls_smoke.py).
+            session.execute(text(f"SET LOCAL app.user_id = '{uuid.UUID(str(user_id))}'"))
         yield session
         session.commit()
     except Exception:
