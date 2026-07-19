@@ -19,6 +19,7 @@ jobs:
           POSTGRES_USER: lexireview
           POSTGRES_PASSWORD: lexireview_dev
           POSTGRES_DB: lexireview
+	  JWT_SECRET: ci_test_jwt_secret_not_a_real_secret_at_least_32_bytes_long_padding
         ports:
           - 5432:5432
         options: >-
