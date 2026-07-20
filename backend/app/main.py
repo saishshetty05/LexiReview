@@ -6,10 +6,13 @@ routes are B's. Same file, don't pull each other's in-progress branches.
 from __future__ import annotations
 
 import os
+import shutil
+import tempfile
 import uuid
 from typing import Iterator
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from celery import Celery
+from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -25,7 +28,10 @@ from app.auth import (
     register,
 )
 from app.db import app_user_session
+from app.jobs import create_queued_job
 from app.models import AnalysisJob, AnalysisResult, Document, DocumentSummary, User
+from app.preflight import PreflightResult, run_preflight
+from app.storage import put_document
 
 app = FastAPI(title="LexiReview API")
 
@@ -258,3 +264,155 @@ def get_document_summary(
     if summary is None:
         raise HTTPException(status_code=404, detail="document summary not found")
     return summary.payload
+
+
+# Producer-only Celery client: sends tasks by name without importing
+# app.worker, which pulls in anthropic/llm_client/analysis_pipeline -- B's
+# whole heavy dependency chain -- into A's upload endpoint. This is the
+# standard Celery producer-side pattern; the task's *implementation* isn't
+# needed to enqueue it, only the app's broker config.
+_celery_producer = Celery(
+    "lexireview-producer", broker=os.environ.get("REDIS_URL", "redis://redis:6379/0")
+)
+
+
+def _enqueue_analysis(doc_id: uuid.UUID, user_id: uuid.UUID) -> None:
+    # Task name verified against worker.py's @celery_app.task(bind=True,
+    # name="analyze_document") decorator -- it explicitly overrides the
+    # default dotted-path name, so "analyze_document" (not
+    # "app.worker.analyze_document") is correct. Pass-by-ID only (CLAUDE.md
+    # rule 4): no document content crosses the queue.
+    _celery_producer.send_task("analyze_document", args=[str(doc_id), str(user_id)])
+
+
+def _preflight_status_code(result: PreflightResult) -> int:
+    # preflight.py returns a free-text reason + a metadata dict, not a
+    # status-code enum -- map by which metadata keys are present, not by
+    # brittle substring matching on the reason alone.
+    reason = result.reason
+    if "size_bytes" in result.metadata and "MB" in reason:
+        return 413  # Payload Too Large
+    if reason.startswith("Unsupported or unrecognized file type"):
+        return 415  # Unsupported Media Type
+    if "page_count" in result.metadata and "pages" in reason and "limit" in reason:
+        return 413  # too many pages is also a size-class limit
+    # Empty file, corrupted/encrypted PDF or DOCX, no extractable text,
+    # context-limit exceeded: the file was readable but not processable.
+    return 422  # Unprocessable Entity
+
+
+@app.post("/documents/upload", status_code=201)
+def upload_document(
+    file: UploadFile = File(...), current: tuple[User, Session] = Depends(get_current_user)
+) -> dict:
+    """FR-6 / CLAUDE.md rule 8: preflight passes BEFORE any storage or DB
+    write happens -- nothing below the preflight call executes on rejection.
+
+    Storage-failure handling: storage.put_document() is called INSIDE the
+    same app_user_session block as the documents/analysis_jobs inserts, one
+    commit at the end. If put_document raises, the exception propagates out
+    of the `with` block and app_user_session's own except-clause rolls the
+    transaction back -- no compensating DELETE is needed (and app_user has
+    no DELETE grant on documents by design; only delete_account_cascade may
+    ever use the owner connection). An orphaned documents row with no bytes
+    in storage is worse than nothing: a later fetch_document/summary call
+    would hit "found in DB, missing in storage" with no clean retry path.
+    Rolling back lets the client just re-upload.
+
+    FR-6 dedup: one documents.doc_version_hash match for the caller (RLS
+    scopes the SELECT, no explicit user_id filter needed) returns 409 with
+    the existing doc_id + its most recent job_id, so the client can poll
+    /jobs/{job_id} instead of re-uploading. This is an app-level SELECT
+    before INSERT, not a DB unique constraint -- two concurrent uploads of
+    the identical file by the same user could both pass the check. Accepted
+    gap for this PR; closing it needs a unique index on
+    (user_id, doc_version_hash), a schema change out of scope here.
+    """
+    user, _outer_session = current
+    contents = file.file.read()
+
+    # Mirrors extraction.py's per-job random temp dir pattern (CLAUDE.md
+    # rule 5): all file I/O for preflight happens inside it, purged in a
+    # finally block regardless of accept/reject.
+    job_dir = tempfile.mkdtemp(prefix="lexireview-upload-")
+    try:
+        upload_path = os.path.join(job_dir, "upload")
+        with open(upload_path, "wb") as f:
+            f.write(contents)
+        result = run_preflight(upload_path)
+    finally:
+        shutil.rmtree(job_dir, ignore_errors=True)
+
+    if not result.accepted:
+        raise HTTPException(
+            status_code=_preflight_status_code(result),
+            detail={"category": "preflight_rejected", "message": result.reason},
+        )
+
+    sha256_hash = result.metadata["sha256"]
+    file_type = result.metadata["file_type"]
+    page_count = result.metadata.get("page_count")
+    size_bytes = result.metadata["size_bytes"]
+    # original_filename is sanitized-at-upload text only (models.py's
+    # Document docstring) -- basename strips any path/traversal components.
+    sanitized_filename = os.path.basename(file.filename or "upload")
+
+    with app_user_session(user.id) as session:
+        existing = (
+            session.execute(select(Document).where(Document.doc_version_hash == sha256_hash))
+            .scalars()
+            .first()
+        )
+        if existing is not None:
+            existing_job = (
+                session.execute(
+                    select(AnalysisJob)
+                    .where(AnalysisJob.doc_id == existing.doc_id)
+                    .order_by(AnalysisJob.created_at.desc())
+                    .limit(1)
+                )
+                .scalars()
+                .first()
+            )
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "category": "duplicate_document",
+                    "message": "A document with this content has already been uploaded.",
+                    "doc_id": str(existing.doc_id),
+                    "job_id": str(existing_job.id) if existing_job else None,
+                },
+            )
+
+        doc_id = uuid.uuid4()
+        document = Document(
+            doc_id=doc_id,
+            user_id=user.id,
+            version=1,
+            doc_version_hash=sha256_hash,
+            original_filename=sanitized_filename,
+            file_type=file_type,
+            page_count=page_count,
+            size_bytes=size_bytes,
+            is_synthetic=False,
+        )
+        session.add(document)
+        job = create_queued_job(
+            session, user_id=user.id, doc_id=doc_id, doc_version_hash=sha256_hash
+        )
+        job_id = job.id
+
+        try:
+            put_document(user.id, doc_id, 1, contents)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "category": "storage_failure",
+                    "message": "Could not store the uploaded document. Please try again.",
+                },
+            ) from exc
+
+    _enqueue_analysis(doc_id, user.id)
+
+    return {"doc_id": str(doc_id), "job_id": str(job_id), "state": "queued"}
