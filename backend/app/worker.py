@@ -7,7 +7,7 @@ from celery import Celery
 from sqlalchemy import select
 
 from app.analysis_pipeline import run_analysis
-from app.db import SessionLocal, app_user_session
+from app.db import app_user_session
 from app.jobs import (
     MAX_RETRIES, TransientAnalysisError, backoff_seconds, get_active_job,
     mark_failed, mark_running, mark_succeeded, mark_transient_failure,
@@ -115,28 +115,44 @@ def dead_letter_record(job_id: str, doc_id: str, user_id: str, error_reason: str
 
 @celery_app.task(bind=True, name="analyze_document")
 def analyze_document(self, doc_id: str, user_id: str) -> None:
-    """Pass-by-ID only, per CLAUDE.md rule 4 — no document content crosses the queue."""
-    with SessionLocal() as session:
-        job = get_active_job(session, user_id=uuid.UUID(user_id), doc_id=uuid.UUID(doc_id))
-        if job is None:
-            return
+    """Pass-by-ID only, per CLAUDE.md rule 4 — no document content crosses the queue.
 
+    Every DB touch here goes through its own app_user_session(uid) block,
+    one per state transition, rather than a single session reused across
+    several session.commit() calls. SET LOCAL is transaction-scoped: it does
+    not survive a commit, so reusing one session/transaction across multiple
+    commits (as this used to do with a plain SessionLocal(), which never set
+    app.user_id at all) meant every query here ran with app.user_id unset.
+    analysis_jobs' RLS policy (`user_id = current_setting('app.user_id',
+    true)::uuid`) then silently returned ZERO rows for every query -- NULL
+    compared to anything is NULL, not an error -- so get_active_job always
+    found nothing and no job was ever actually picked up against real
+    Postgres (see DECISION_LOG.md 2026-07-20). Unit tests never caught this:
+    test_worker.py swapped in an in-memory SQLite engine with no RLS at all.
+    """
+    uid = uuid.UUID(user_id)
+
+    with app_user_session(uid) as session:
+        job = get_active_job(session, user_id=uid, doc_id=uuid.UUID(doc_id))
+    if job is None:
+        return
+
+    with app_user_session(uid) as session:
         mark_running(session, job)
-        session.commit()
 
-        try:
-            _execute_analysis(job)
-        except TransientAnalysisError as exc:
+    try:
+        _execute_analysis(job)
+    except TransientAnalysisError as exc:
+        with app_user_session(uid) as session:
             job = mark_transient_failure(session, job, category=exc.category, message=exc.message)
-            session.commit()
-            if job.state == JobState.FAILED.value:
-                send_to_dead_letter(job)
-                return
-            raise self.retry(countdown=backoff_seconds(job.retry_count), max_retries=MAX_RETRIES)
-        except Exception as exc:  # non-transient / unexpected — terminal, not retried
+        if job.state == JobState.FAILED.value:
+            send_to_dead_letter(job)
+            return
+        raise self.retry(countdown=backoff_seconds(job.retry_count), max_retries=MAX_RETRIES)
+    except Exception as exc:  # non-transient / unexpected — terminal, not retried
+        with app_user_session(uid) as session:
             mark_failed(session, job, category="unexpected_error", message=str(exc))
-            session.commit()
-            raise
-        else:
+        raise
+    else:
+        with app_user_session(uid) as session:
             mark_succeeded(session, job)
-            session.commit()
