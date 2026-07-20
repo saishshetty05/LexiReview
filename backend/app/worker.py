@@ -6,14 +6,14 @@ import anthropic
 from celery import Celery
 from sqlalchemy import select
 
-from app.analysis_pipeline import run_analysis
+from app.analysis_pipeline import run_analysis, run_summary
 from app.db import app_user_session
 from app.jobs import (
-    MAX_RETRIES, TransientAnalysisError, backoff_seconds, get_active_job,
-    mark_failed, mark_running, mark_succeeded, mark_transient_failure,
+    MAX_RETRIES, TransientAnalysisError, _format_error, backoff_seconds,
+    get_active_job, mark_failed, mark_running, mark_succeeded, mark_transient_failure,
 )
-from app.llm_client import LLMClient
-from app.models import AnalysisJob, AnalysisResult, Document, JobState
+from app.llm_client import LLMClient, LLMClientError
+from app.models import AnalysisJob, AnalysisResult, Document, DocumentSummary, JobState
 from app.storage import fetch_document
 
 # Anthropic errors that survive the SDK's own internal retry budget (see
@@ -39,9 +39,12 @@ def ping() -> str:
     return "pong"
 
 
-def _execute_analysis(job: AnalysisJob) -> None:
+def _execute_analysis(job: AnalysisJob) -> list[dict]:
     """Fetch the document, run the analysis pipeline, and persist findings
-    as AnalysisResult rows (CONTRACTS.md §2 Storage).
+    as AnalysisResult rows (CONTRACTS.md §2 Storage). Returns the same
+    findings list, so a caller can feed it to _execute_summary without a
+    second query -- unused today (analyze_document ignores the return
+    value), but keeps that seam a one-line change once wired up.
 
     document.is_synthetic (CONTRACTS.md §1a) is resolved from the same
     documents row already being fetched for file_type -- one query, not two
@@ -93,6 +96,67 @@ def _execute_analysis(job: AnalysisJob) -> None:
                     payload=finding,
                 )
             )
+
+    return findings
+
+
+def _execute_summary(job: AnalysisJob, findings: list[dict]) -> str | None:
+    """Generates and persists the document summary (CONTRACTS.md §2c) using
+    the findings _execute_analysis already wrote for this job. Returns a
+    "category: message" error string on any failure, and NEVER raises --
+    summary generation is supplementary (findings are the primary output
+    per the v1.4 decision), so nothing here may fail the job itself, and
+    there is no job-level retry for it: a single best-effort attempt per
+    job, same rationale as the summary_error column decision.
+
+    NOT YET CALLED from analyze_document. CONTRACTS.md §2c's worker-trigger
+    decision has the returned error persisted to the nullable
+    analysis_jobs.summary_error column, in the same UPDATE that marks the
+    job succeeded -- but that column doesn't exist yet (migration 004, A's
+    schema lane, in progress as of this writing). Wiring this in is then a
+    two-line change in analyze_document (call this before mark_succeeded,
+    thread the result into mark_succeeded's new summary_error kwarg);
+    everything else here is ready and independently tested now.
+    """
+    try:
+        with app_user_session(job.user_id) as session:
+            document = session.execute(
+                select(Document).where(
+                    Document.doc_id == job.doc_id,
+                    Document.doc_version_hash == job.doc_version_hash,
+                )
+            ).scalar_one_or_none()
+            if document is None:
+                # Same "this can only mean a bad reference, not a timing
+                # fluke" reasoning as _execute_analysis's identical check.
+                raise LookupError(
+                    f"no documents row for doc_id={job.doc_id} "
+                    f"doc_version_hash={job.doc_version_hash!r} under this job's user_id"
+                )
+            file_type = document.file_type
+            is_synthetic = document.is_synthetic
+
+        file_bytes = fetch_document(job.doc_id, job.user_id, job.doc_version_hash)
+        llm_client = LLMClient()
+        payload = run_summary(
+            file_bytes, file_type, llm_client, findings, is_synthetic=is_synthetic
+        )
+
+        with app_user_session(job.user_id) as session:
+            session.add(
+                DocumentSummary(
+                    user_id=job.user_id,
+                    doc_id=job.doc_id,
+                    doc_version_hash=job.doc_version_hash,
+                    model_version=llm_client.config.model,
+                    payload=payload,
+                )
+            )
+        return None
+    except LLMClientError as exc:
+        return _format_error(exc.category, exc.message)
+    except Exception as exc:  # intentionally broad -- must never propagate, see docstring
+        return _format_error("summary_generation_error", str(exc))
 
 
 def send_to_dead_letter(job: AnalysisJob) -> None:
