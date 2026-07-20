@@ -248,3 +248,45 @@ def test_upload_storage_failure_rolls_back_document_row(
     assert doc_count == 0
     assert job_count == 0
     assert recorded_tasks == []
+
+
+def test_upload_broker_failure_returns_502_and_leaves_job_queued(
+    pg_owner_engine, cleanup_rows, s3_env, monkeypatch
+):
+    """Unlike the storage-failure case above, _enqueue_analysis runs after
+    the documents/analysis_jobs transaction has already committed -- there
+    is nothing left to roll back into. CONTRACTS.md §5: 502, doc_id/job_id
+    returned so the caller isn't left with nothing, and the job is left
+    `queued` rather than marked failed (jobs.py's mark_failed only allows
+    running->failed, per CONTRACTS.md §1 -- there's no queued->failed arrow
+    to use here, a documented, accepted gap for this version).
+    """
+    user_id, auth_cookies = _register_user(pg_owner_engine)
+    cleanup_rows.append(user_id)
+
+    def failing_send_task(*args, **kwargs):
+        raise ConnectionError("simulated broker outage")
+
+    monkeypatch.setattr(main_module._celery_producer, "send_task", failing_send_task)
+
+    resp = client.post(
+        "/documents/upload",
+        cookies=auth_cookies,
+        files={"file": ("lease.pdf", io.BytesIO(_valid_pdf_bytes()), "application/pdf")},
+    )
+
+    assert resp.status_code == 502
+    detail = resp.json()["detail"]
+    assert detail["category"] == "broker_failure"
+    assert "doc_id" in detail and "job_id" in detail
+
+    with pg_owner_engine.connect() as conn:
+        doc_row = conn.execute(
+            text("SELECT id FROM documents WHERE doc_id = :id"), {"id": detail["doc_id"]}
+        ).fetchone()
+        job_row = conn.execute(
+            text("SELECT state FROM analysis_jobs WHERE id = :id"), {"id": detail["job_id"]}
+        ).fetchone()
+    assert doc_row is not None
+    assert job_row is not None
+    assert job_row.state == "queued"

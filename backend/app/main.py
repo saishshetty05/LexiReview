@@ -413,6 +413,29 @@ def upload_document(
                 },
             ) from exc
 
-    _enqueue_analysis(doc_id, user.id)
+    try:
+        _enqueue_analysis(doc_id, user.id)
+    except Exception as exc:
+        # The documents/analysis_jobs rows are already committed (the
+        # app_user_session block above already exited) -- unlike
+        # put_document's failure, there is no transaction left to roll this
+        # back into. The job is deliberately left `queued` rather than
+        # marked failed: jobs.py's mark_failed only allows a running->failed
+        # transition (CONTRACTS.md §1's state machine has no queued->failed
+        # arrow), and adding one isn't a call to make under time pressure
+        # without a contract sign-off. Known, accepted gap for this PR, same
+        # as the dedup race above -- the row stays queued (a manual re-drive
+        # would need a follow-up, tracked in CONTRACTS.md §5) rather than
+        # silently losing the failure, and the caller gets an immediate,
+        # structured signal instead of a generic 500.
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "category": "broker_failure",
+                "message": "Document was stored but analysis could not be queued. Please try again.",
+                "doc_id": str(doc_id),
+                "job_id": str(job_id),
+            },
+        ) from exc
 
     return {"doc_id": str(doc_id), "job_id": str(job_id), "state": "queued"}

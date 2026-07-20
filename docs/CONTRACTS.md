@@ -314,6 +314,20 @@ Scope note: one uploaded file is always a brand-new `documents` row
 *conceptually-same* document (same `doc_id`, `version=2`) is out of scope
 for this version — no version-linking UI/API exists yet.
 
+DECIDED — broker-enqueue failure: `_enqueue_analysis`'s `send_task` call
+happens *after* the `documents`/`analysis_jobs` transaction has already
+committed, so a broker failure there (unlike `put_document`'s) has nothing
+left to roll back into. Failure response: 502,
+`{"detail": {"category": "broker_failure", "message": "...", "doc_id": "...",
+"job_id": "..."}}`. The job is deliberately left in `state=queued` rather
+than marked `failed`: §1's state machine has no `queued -> failed` arrow
+(`mark_failed` only allows `running -> failed`), and adding one is a
+contract change, not something to decide under this fix's scope. Known,
+accepted gap for this version, same class as the FR-6 dedup race above — a
+job stuck `queued` after a broker failure has no automatic re-drive path
+yet; closing it needs either a `queued -> failed` arrow (contract change)
+or a re-enqueue mechanism, both out of scope here.
+
 ## Change log
 
 - v1 (2026-07-13): initial locked version. All DECIDED items chosen from the
@@ -336,7 +350,9 @@ for this version — no version-linking UI/API exists yet.
   No changes to any prior section.
 - v1.5 (2026-07-20): added §5, `POST /documents/upload` (FR-6, CLAUDE.md
   rule 8) — preflight-before-any-write ordering, preflight rejection status
-  mapping, FR-6 SHA-256 dedup (409 + existing doc_id/job_id), and the
+  mapping, FR-6 SHA-256 dedup (409 + existing doc_id/job_id), the
   storage-failure rollback strategy (put_document inside the same
-  app_user_session transaction as the DB inserts). No changes to any prior
-  section.
+  app_user_session transaction as the DB inserts), and the broker-enqueue
+  failure response (502, job left `queued` — §1's state machine has no
+  `queued -> failed` arrow, closing that gap is a separate follow-up). No
+  changes to any prior section.
