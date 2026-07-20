@@ -64,6 +64,39 @@ def test_login_success_sets_cookie(registered_user):
     assert ACCESS_TOKEN_COOKIE in resp.cookies
 
 
+def test_login_cookie_is_secure_by_default(registered_user, monkeypatch):
+    # Fail-safe default: unset (or any value other than exactly
+    # "development") keeps Secure on. resp.cookies (httpx's CookieJar)
+    # doesn't preserve attributes like Secure -- assert on the raw
+    # Set-Cookie header instead.
+    monkeypatch.delenv("ENVIRONMENT", raising=False)
+    _user_id, email, password = registered_user
+    resp = client.post("/auth/login", json={"email": email, "password": password})
+    assert resp.status_code == 200
+    assert "Secure" in resp.headers["set-cookie"]
+
+
+def test_login_cookie_is_not_secure_in_development(registered_user, monkeypatch):
+    # PR #39 review finding: Vite dev serves plain http://localhost:5173,
+    # and browsers silently drop Secure cookies there -- login would 200
+    # but the cookie wouldn't stick, and everything after would 401.
+    monkeypatch.setenv("ENVIRONMENT", "development")
+    _user_id, email, password = registered_user
+    try:
+        resp = client.post("/auth/login", json={"email": email, "password": password})
+        assert resp.status_code == 200
+        assert "Secure" not in resp.headers["set-cookie"]
+    finally:
+        # Every other cookie in this file is Secure, and httpx's TestClient
+        # jar (scheme http://testserver) silently refuses to persist a
+        # Secure cookie across requests -- this test is the ONLY one that
+        # produces a non-Secure cookie, so it's the only one that can leak
+        # a stale cookie into later tests (e.g.
+        # test_get_current_user_rejects_missing_token expecting none)
+        # unless explicitly cleared here.
+        client.cookies.clear()
+
+
 def test_login_wrong_password_rejected(registered_user):
     _user_id, email, _password = registered_user
     resp = client.post("/auth/login", json={"email": email, "password": "wrong-password-1!"})

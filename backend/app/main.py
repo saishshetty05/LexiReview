@@ -60,11 +60,19 @@ class LoginRequest(BaseModel):
 
 
 def _set_access_cookie(response: Response, token: str) -> None:
+    # Secure cookies are dropped silently by browsers over plain HTTP
+    # (Vite dev serves http://localhost:5173) -- login would 200 but the
+    # cookie wouldn't stick, and everything after would 401. Fail-safe
+    # default is secure=True (production-safe); only local compose dev
+    # explicitly opts out via ENVIRONMENT=development (set in
+    # docker-compose.yml, not requiring a manual .env edit). Found in PR
+    # #39 review, flagged as out of scope there since app/auth.py is A's file.
+    is_dev = os.environ.get("ENVIRONMENT") == "development"
     response.set_cookie(
         ACCESS_TOKEN_COOKIE,
         token,
         httponly=True,
-        secure=True,
+        secure=not is_dev,
         samesite="strict",
         max_age=ACCESS_TOKEN_TTL_MINUTES * 60,
     )
