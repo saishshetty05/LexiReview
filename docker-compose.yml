@@ -50,6 +50,11 @@ services:
       # Migrations run against DATABASE_URL (owner role, DDL). The running
       # app must use APP_DATABASE_URL (app_user, RLS-enforced) instead.
       APP_DATABASE_URL: postgresql://app_user:${APP_USER_PASSWORD}@postgres:5432/${POSTGRES_DB:-lexireview}
+      # Vite dev serves plain http://localhost:5173 -- browsers silently
+      # drop Secure cookies over plain HTTP, so local compose dev must opt
+      # out explicitly (app/main.py's _set_access_cookie). Set here, not
+      # only in .env.example, so it applies without a manual .env edit.
+      ENVIRONMENT: development
     volumes:
       - ./backend:/code
     ports:
