@@ -255,6 +255,79 @@ DECIDED — key convention: `{user_id}/{doc_id}/v{version}`, fully derivable
 from an existing `documents` row with no schema change (see
 `docs/DECISION_LOG.md`, 2026-07-17).
 
+## 5. Document upload (v1.5)
+
+`POST /documents/upload` (FR-6, CLAUDE.md rule 8). Protected by
+`get_current_user`; multipart `file` field.
+
+DECIDED — preflight gates everything: `app/preflight.py`'s `run_preflight`
+runs against the uploaded bytes (written to a per-request temp dir, purged
+in a `finally` block, same pattern as `extraction.py`) BEFORE any `documents`
+or `analysis_jobs` row is written and before `storage.put_document` is
+called. A rejection writes nothing.
+
+Preflight rejection response: `{"detail": {"category": "preflight_rejected",
+"message": "<preflight's reason>"}}`, status mapped from which preflight
+metadata keys are present (not brittle substring matching alone):
+
+| Rejection | Status |
+|---|---|
+| File too large (`size_bytes` in metadata) | 413 |
+| Unsupported/unrecognized file type | 415 |
+| Too many pages (`page_count` in metadata, over limit) | 413 |
+| Everything else (corrupted, encrypted, empty, no extractable text, context-limit exceeded) | 422 |
+
+DECIDED — success response (201): `{"doc_id", "job_id", "state": "queued"}`.
+`analysis_jobs` row is inserted `state=queued` in the same transaction as
+the `documents` row (CONTRACTS.md §1 writer rule: the API writes only the
+initial queued row); the worker is notified via a Celery `send_task` call
+by task name (`"analyze_document"`, matching `worker.py`'s registered name
+exactly — pass-by-ID only, CLAUDE.md rule 4), not by importing `app.worker`
+directly, to keep A's upload endpoint out of B's heavy LLM-client import
+chain.
+
+DECIDED — FR-6 dedup: one `documents.doc_version_hash` (SHA-256) match for
+the caller (RLS scopes the lookup, same anti-enumeration pattern as
+`fetch_document`) returns 409:
+`{"detail": {"category": "duplicate_document", "message": "...",
+"doc_id": "<existing>", "job_id": "<its most recent job, or null>"}}` — the
+client polls `/jobs/{job_id}` instead of re-uploading. This is an app-level
+SELECT-before-INSERT, not a DB unique constraint; a race between two
+concurrent identical uploads by the same user is a known, accepted gap for
+this version — closing it needs a unique index on
+`(user_id, doc_version_hash)`, a schema change out of scope here.
+
+DECIDED — storage-failure rollback: `storage.put_document` is called
+*inside* the same `app_user_session` block as the `documents`/
+`analysis_jobs` inserts, before the block's implicit commit. If it raises,
+the session's own except-clause rolls the whole transaction back — no
+compensating `DELETE` is needed (`app_user` has no `DELETE` grant on
+`documents` by design; only `delete_account_cascade` may ever use the owner
+connection, per the 2026-07-15 decision). An orphaned `documents` row with
+no bytes in storage was rejected as strictly worse than a clean rollback: a
+later `fetch_document`/summary call would hit `object_missing` with no way
+for the user to retry cleanly. Failure response: 500,
+`{"detail": {"category": "storage_failure", "message": "..."}}`.
+
+Scope note: one uploaded file is always a brand-new `documents` row
+(`version=1`, fresh `doc_id`). Uploading a new version of a
+*conceptually-same* document (same `doc_id`, `version=2`) is out of scope
+for this version — no version-linking UI/API exists yet.
+
+DECIDED — broker-enqueue failure: `_enqueue_analysis`'s `send_task` call
+happens *after* the `documents`/`analysis_jobs` transaction has already
+committed, so a broker failure there (unlike `put_document`'s) has nothing
+left to roll back into. Failure response: 502,
+`{"detail": {"category": "broker_failure", "message": "...", "doc_id": "...",
+"job_id": "..."}}`. The job is deliberately left in `state=queued` rather
+than marked `failed`: §1's state machine has no `queued -> failed` arrow
+(`mark_failed` only allows `running -> failed`), and adding one is a
+contract change, not something to decide under this fix's scope. Known,
+accepted gap for this version, same class as the FR-6 dedup race above — a
+job stuck `queued` after a broker failure has no automatic re-drive path
+yet; closing it needs either a `queued -> failed` arrow (contract change)
+or a re-enqueue mechanism, both out of scope here.
+
 ## Change log
 
 - v1 (2026-07-13): initial locked version. All DECIDED items chosen from the
@@ -275,3 +348,11 @@ from an existing `documents` row with no schema change (see
   (`analysis_jobs.summary_error`, nullable). `GET /documents/{id}/summary`
   (§2b) confirmed as Person A's, built after the summary-write path lands.
   No changes to any prior section.
+- v1.5 (2026-07-20): added §5, `POST /documents/upload` (FR-6, CLAUDE.md
+  rule 8) — preflight-before-any-write ordering, preflight rejection status
+  mapping, FR-6 SHA-256 dedup (409 + existing doc_id/job_id), the
+  storage-failure rollback strategy (put_document inside the same
+  app_user_session transaction as the DB inserts), and the broker-enqueue
+  failure response (502, job left `queued` — §1's state machine has no
+  `queued -> failed` arrow, closing that gap is a separate follow-up). No
+  changes to any prior section.
