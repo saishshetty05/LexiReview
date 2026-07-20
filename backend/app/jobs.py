@@ -97,10 +97,22 @@ def mark_running(session: Session, job: AnalysisJob) -> AnalysisJob:
     return _persist(session, job)
 
 
-def mark_succeeded(session: Session, job: AnalysisJob) -> AnalysisJob:
+def mark_succeeded(
+    session: Session, job: AnalysisJob, *, summary_error: str | None = None
+) -> AnalysisJob:
+    """summary_error is an already-formatted "category: message" string
+    (worker._execute_summary's return value -- CONTRACTS.md §2c) for a
+    summary-generation failure, supplementary to findings, so it never
+    blocks success; None (the default) means summary generation succeeded
+    or was never attempted, both unremarkable per the v1.4 worker-trigger
+    design. Stored as-is, not re-formatted -- _execute_summary already
+    applies the same _format_error (category + 200-char-truncated message)
+    used for error_reason elsewhere in this module.
+    """
     _assert_from_state(job, JobState.RUNNING.value)
     job.state = JobState.SUCCEEDED.value
     job.finished_at = _now()
+    job.summary_error = summary_error
     return _persist(session, job)
 
 

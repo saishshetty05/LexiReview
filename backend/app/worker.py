@@ -42,9 +42,8 @@ def ping() -> str:
 def _execute_analysis(job: AnalysisJob) -> list[dict]:
     """Fetch the document, run the analysis pipeline, and persist findings
     as AnalysisResult rows (CONTRACTS.md §2 Storage). Returns the same
-    findings list, so a caller can feed it to _execute_summary without a
-    second query -- unused today (analyze_document ignores the return
-    value), but keeps that seam a one-line change once wired up.
+    findings list, which analyze_document feeds to _execute_summary without
+    a second query.
 
     document.is_synthetic (CONTRACTS.md §1a) is resolved from the same
     documents row already being fetched for file_type -- one query, not two
@@ -109,14 +108,11 @@ def _execute_summary(job: AnalysisJob, findings: list[dict]) -> str | None:
     there is no job-level retry for it: a single best-effort attempt per
     job, same rationale as the summary_error column decision.
 
-    NOT YET CALLED from analyze_document. CONTRACTS.md §2c's worker-trigger
-    decision has the returned error persisted to the nullable
-    analysis_jobs.summary_error column, in the same UPDATE that marks the
-    job succeeded -- but that column doesn't exist yet (migration 004, A's
-    schema lane, in progress as of this writing). Wiring this in is then a
-    two-line change in analyze_document (call this before mark_succeeded,
-    thread the result into mark_succeeded's new summary_error kwarg);
-    everything else here is ready and independently tested now.
+    Called from analyze_document after findings are secured, before
+    mark_succeeded -- the returned error is threaded into mark_succeeded's
+    summary_error kwarg, persisted to the nullable analysis_jobs.summary_error
+    column in the same UPDATE that marks the job succeeded (CONTRACTS.md
+    §2c's worker-trigger decision; migrations 004/005).
     """
     try:
         with app_user_session(job.user_id) as session:
@@ -205,7 +201,7 @@ def analyze_document(self, doc_id: str, user_id: str) -> None:
         mark_running(session, job)
 
     try:
-        _execute_analysis(job)
+        findings = _execute_analysis(job)
     except TransientAnalysisError as exc:
         with app_user_session(uid) as session:
             job = mark_transient_failure(session, job, category=exc.category, message=exc.message)
@@ -218,5 +214,10 @@ def analyze_document(self, doc_id: str, user_id: str) -> None:
             mark_failed(session, job, category="unexpected_error", message=str(exc))
         raise
     else:
+        # Summary generation is supplementary (CONTRACTS.md §2c) and runs
+        # after findings are secured, before the job is marked succeeded --
+        # _execute_summary never raises, so a summary failure (e.g. no LLM
+        # key configured yet) cannot fail the job itself, only annotate it.
+        summary_error = _execute_summary(job, findings)
         with app_user_session(uid) as session:
-            mark_succeeded(session, job)
+            mark_succeeded(session, job, summary_error=summary_error)

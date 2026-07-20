@@ -33,7 +33,31 @@ def test_happy_path_queued_running_succeeded(session):
     mark_succeeded(session, job)
     assert job.state == JobState.SUCCEEDED.value
     assert job.finished_at is not None
+    assert job.summary_error is None
     assert get_active_job(session, user_id=job.user_id, doc_id=job.doc_id) is None
+
+
+def test_mark_succeeded_records_summary_error_without_affecting_job_state(session):
+    """CONTRACTS.md §2c: summary generation is supplementary -- a failure
+    there is recorded on the job row, but the job itself still succeeds
+    (state=succeeded, not failed), since findings are the primary output.
+    """
+    job = _new_job(session)
+    mark_running(session, job)
+
+    mark_succeeded(session, job, summary_error="provider_not_configured: no API key configured")
+
+    assert job.state == JobState.SUCCEEDED.value
+    assert job.summary_error == "provider_not_configured: no API key configured"
+
+
+def test_mark_succeeded_summary_error_none_leaves_column_null(session):
+    job = _new_job(session)
+    mark_running(session, job)
+
+    mark_succeeded(session, job, summary_error=None)
+
+    assert job.summary_error is None
 
 
 def test_each_transient_retry_requeues_then_exhaustion_fails(session):

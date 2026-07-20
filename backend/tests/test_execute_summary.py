@@ -5,11 +5,10 @@ _execute_summary reads/writes through app_user_session), with
 fetch_document and run_summary both faked so no real S3/MinIO or LLM
 provider is touched.
 
-NOT YET called from analyze_document -- see _execute_summary's docstring
-for why (blocked on migration 004, analysis_jobs.summary_error). These
-tests exercise the function directly, the same way test_execute_analysis.py
-tests _execute_analysis directly ahead of/independent of the Celery task
-wiring around it.
+Called from analyze_document (see test_worker.py for the wiring-level
+tests); these exercise the function directly, the same way
+test_execute_analysis.py tests _execute_analysis directly, independent of
+the Celery task orchestration around it.
 """
 from __future__ import annotations
 
