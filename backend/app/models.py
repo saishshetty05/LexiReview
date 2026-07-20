@@ -145,6 +145,11 @@ class AnalysisJob(Base):
     state: Mapped[str] = mapped_column(String, nullable=False, default=JobState.QUEUED.value)
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     error_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # CONTRACTS.md §2c (v1.4): same "category: message" format as
+    # error_reason. NULL covers both "summary succeeded" and "summary
+    # generation wasn't attempted" -- a single best-effort attempt, not a
+    # first-class tracked entity, per the v1.4 worker-trigger design.
+    summary_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
