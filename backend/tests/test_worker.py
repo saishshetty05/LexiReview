@@ -77,7 +77,7 @@ def _job_row(pg_owner_engine, user_id: uuid.UUID, doc_id: uuid.UUID):
     with pg_owner_engine.connect() as conn:
         return conn.execute(
             text(
-                "SELECT state, retry_count, started_at, finished_at, error_reason "
+                "SELECT state, retry_count, started_at, finished_at, error_reason, summary_error "
                 "FROM analysis_jobs WHERE user_id = :uid AND doc_id = :doc_id"
             ),
             {"uid": user_id, "doc_id": doc_id},
@@ -87,11 +87,14 @@ def _job_row(pg_owner_engine, user_id: uuid.UUID, doc_id: uuid.UUID):
 def test_analyze_document_happy_path_and_unexpected_error(pg_owner_engine, cleanup_rows):
     user_id, doc_id = _seed_job(pg_owner_engine)
     cleanup_rows.append(user_id)
-    with patch.object(worker, "_execute_analysis", return_value=None):
+    with patch.object(worker, "_execute_analysis", return_value=[]), patch.object(
+        worker, "_execute_summary", return_value=None
+    ):
         worker.analyze_document.apply(args=(str(doc_id), str(user_id))).get()
     row = _job_row(pg_owner_engine, user_id, doc_id)
     assert row.state == JobState.SUCCEEDED.value
     assert row.started_at is not None and row.finished_at is not None
+    assert row.summary_error is None
 
     user_id, doc_id = _seed_job(pg_owner_engine)
     cleanup_rows.append(user_id)
@@ -147,7 +150,9 @@ def test_analyze_document_actually_persists_through_rls_not_a_silent_noop(
     before = _job_row(pg_owner_engine, user_id, doc_id)
     assert before.state == "queued" and before.started_at is None
 
-    with patch.object(worker, "_execute_analysis", return_value=None) as mock_execute:
+    with patch.object(worker, "_execute_analysis", return_value=[]) as mock_execute, patch.object(
+        worker, "_execute_summary", return_value=None
+    ):
         worker.analyze_document.apply(args=(str(doc_id), str(user_id))).get()
 
     mock_execute.assert_called_once()
@@ -155,3 +160,27 @@ def test_analyze_document_actually_persists_through_rls_not_a_silent_noop(
     assert after.state == JobState.SUCCEEDED.value
     assert after.started_at is not None
     assert after.finished_at is not None
+
+
+def test_analyze_document_persists_summary_error_without_failing_the_job(
+    pg_owner_engine, cleanup_rows
+):
+    """CONTRACTS.md §2c: summary generation is supplementary. A failure
+    there (e.g. no LLM key configured yet) must be recorded on the job row
+    but must NOT fail the job -- findings are the primary output, and
+    _execute_summary already guarantees it never raises.
+    """
+    user_id, doc_id = _seed_job(pg_owner_engine)
+    cleanup_rows.append(user_id)
+    findings = [{"category": "liability", "severity": "high"}]
+
+    with patch.object(worker, "_execute_analysis", return_value=findings) as mock_execute, patch.object(
+        worker, "_execute_summary", return_value="provider_not_configured: no API key"
+    ) as mock_summary:
+        worker.analyze_document.apply(args=(str(doc_id), str(user_id))).get()
+
+    mock_execute.assert_called_once()
+    mock_summary.assert_called_once_with(mock_summary.call_args.args[0], findings)
+    row = _job_row(pg_owner_engine, user_id, doc_id)
+    assert row.state == JobState.SUCCEEDED.value
+    assert row.summary_error == "provider_not_configured: no API key"
