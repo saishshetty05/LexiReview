@@ -1,15 +1,18 @@
 import { Navigate, Route, Routes } from "react-router-dom";
+import { LoginPage } from "./pages/LoginPage";
 import { ReviewPage } from "./pages/ReviewPage";
+import { UploadPage } from "./pages/UploadPage";
 
-// Walking skeleton: one real route. The root redirect exists only so
-// `npm run dev` lands somewhere useful -- there is no job list yet.
-const SAMPLE_JOB_ID = "00000000-0000-0000-0000-000000000001";
-
+// No route guards: there's no GET /auth/me to check session state without a
+// request, so an unauthenticated visit to /upload or /review just gets a 401
+// from its first fetch, which those pages catch and redirect to /login from.
 export default function App() {
   return (
     <Routes>
+      <Route path="/login" element={<LoginPage />} />
+      <Route path="/upload" element={<UploadPage />} />
       <Route path="/review/:jobId" element={<ReviewPage />} />
-      <Route path="/" element={<Navigate to={`/review/${SAMPLE_JOB_ID}`} replace />} />
+      <Route path="/" element={<Navigate to="/login" replace />} />
     </Routes>
   );
 }
