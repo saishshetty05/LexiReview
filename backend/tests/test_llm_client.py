@@ -19,7 +19,6 @@ from app.llm_client import (
     PseudonymisationRequiredError,
     SummaryGuardrailViolationError,
     SyntheticOnlyViolationError,
-    TEMPERATURE,
     TIMEOUT_SECONDS,
 )
 
@@ -189,8 +188,11 @@ def test_anthropic_analyze_uses_expected_call_params(monkeypatch):
 
     call_kwargs = instance.messages.received_kwargs
     assert call_kwargs["model"] == "claude-haiku"
-    assert call_kwargs["temperature"] == TEMPERATURE
     assert call_kwargs["tool_choice"] == {"type": "tool", "name": "record_findings"}
+    # temperature is deprecated for Claude models released after Opus 4.6
+    # (April 2026) -- see docs/DECISION_LOG.md 2026-07-23 and the dedicated
+    # regression test below.
+    assert "temperature" not in call_kwargs
 
 
 def test_anthropic_analyze_raises_on_missing_tool_use_block(monkeypatch):
@@ -295,7 +297,10 @@ def test_anthropic_summarize_uses_expected_call_params(monkeypatch):
 
     call_kwargs = created["instance"].messages.received_kwargs
     assert call_kwargs["tool_choice"] == {"type": "tool", "name": "record_summary"}
-    assert call_kwargs["temperature"] == TEMPERATURE
+    # temperature is deprecated for Claude models released after Opus 4.6
+    # (April 2026) -- see docs/DECISION_LOG.md 2026-07-23 and the dedicated
+    # regression test below.
+    assert "temperature" not in call_kwargs
 
 
 def test_anthropic_summarize_raises_on_missing_tool_use_block(monkeypatch):
@@ -351,3 +356,34 @@ def test_anthropic_summarize_rejects_forbidden_safety_language(monkeypatch, over
     with pytest.raises(SummaryGuardrailViolationError) as exc_info:
         client.summarize([], pseudonymised=True, is_synthetic=False)
     assert exc_info.value.category == "summary_guardrail_violation"
+
+
+def test_temperature_never_sent_to_anthropic(monkeypatch):
+    """Regression guard for the temperature deprecation: Anthropic rejects
+    `temperature` outright (invalid_request_error) for Claude models
+    released after Opus 4.6 (April 2026) -- see docs/DECISION_LOG.md
+    2026-07-23. Confirmed live during upload testing: extraction and
+    pseudonymisation completed, and the API 400'd at the analyze() call.
+    Covers both analyze() and summarize() since each calls
+    client.messages.create() independently."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-test")
+    client = LLMClient(_config(provider="anthropic", synthetic_only=False))
+    captured = {}
+
+    def _capture_analyze(**init_kwargs):
+        instance = _FakeAnthropicClient(response=_tool_use_response([]), **init_kwargs)
+        captured["analyze"] = instance
+        return instance
+
+    monkeypatch.setattr(llm_client.anthropic, "Anthropic", _capture_analyze)
+    client.analyze([], pseudonymised=True, is_synthetic=False)
+    assert "temperature" not in captured["analyze"].messages.received_kwargs
+
+    def _capture_summarize(**init_kwargs):
+        instance = _FakeAnthropicClient(response=_summary_tool_use_response("x", []), **init_kwargs)
+        captured["summarize"] = instance
+        return instance
+
+    monkeypatch.setattr(llm_client.anthropic, "Anthropic", _capture_summarize)
+    client.summarize([], pseudonymised=True, is_synthetic=False)
+    assert "temperature" not in captured["summarize"].messages.received_kwargs

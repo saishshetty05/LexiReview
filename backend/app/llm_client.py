@@ -1,15 +1,18 @@
 """llm_client.py — provider-agnostic LLM client for the analysis lane.
 
 Enforces every guardrail from CLAUDE.md rule 3 before any provider dispatch.
-`anthropic` has a real implementation (see _analyze_anthropic): temperature
-0, 180s timeout, JSON-schema-constrained via forced tool use, retries via
-the SDK's built-in exponential backoff (PRD NFR "Reliability" section --
-no specific retry count is given there, so this matches the job-level
-policy of 3 for consistency). Other providers (e.g. gemini_free) remain
-STUBs: a call that clears every guardrail raises ProviderNotConfiguredError
-(no key set) or NotImplementedError (key set, no provider wiring exists).
-The Anthropic Console workspace + API keys are still an open item
-(docs/DECISION_LOG.md, owner B).
+`anthropic` has a real implementation (see _analyze_anthropic): 180s
+timeout, JSON-schema-constrained via forced tool use, retries via the SDK's
+built-in exponential backoff (PRD NFR "Reliability" section -- no specific
+retry count is given there, so this matches the job-level policy of 3 for
+consistency). No temperature is sent -- deprecated for Claude models
+released after Opus 4.6 (April 2026), which are deterministic-by-default
+with no value specified; see docs/DECISION_LOG.md 2026-07-23. Other
+providers (e.g. gemini_free) remain STUBs: a call that clears every
+guardrail raises ProviderNotConfiguredError (no key set) or
+NotImplementedError (key set, no provider wiring exists). The Anthropic
+Console workspace + API keys are still an open item (docs/DECISION_LOG.md,
+owner B).
 """
 
 from __future__ import annotations
@@ -21,6 +24,13 @@ import anthropic
 
 from app.anchors import Block
 
+# Deliberately unused in both _analyze_anthropic and _summarize_anthropic:
+# `temperature` is deprecated for Claude models released after Opus 4.6
+# (April 2026) and the API now rejects it (invalid_request_error). Kept
+# defined, not deleted, as documentation of the intended semantic --
+# newer models are deterministic-by-default with no value specified, which
+# is the same behavior this constant used to make explicit. See
+# docs/DECISION_LOG.md 2026-07-23.
 TEMPERATURE = 0
 TIMEOUT_SECONDS = 180
 ANTHROPIC_MAX_RETRIES = 3
@@ -319,7 +329,10 @@ class LLMClient:
         response = client.messages.create(
             model=self.config.model,
             max_tokens=ANTHROPIC_MAX_TOKENS,
-            temperature=TEMPERATURE,
+            # temperature is deprecated for Claude models released after
+            # Opus 4.6 (April 2026) -- newer models are deterministic-by-
+            # default with no value specified. See docs/DECISION_LOG.md
+            # 2026-07-23.
             system=_SYSTEM_PROMPT,
             tools=[_RECORD_FINDINGS_TOOL],
             tool_choice={"type": "tool", "name": "record_findings"},
@@ -344,7 +357,10 @@ class LLMClient:
         response = client.messages.create(
             model=self.config.model,
             max_tokens=ANTHROPIC_MAX_TOKENS,
-            temperature=TEMPERATURE,
+            # temperature is deprecated for Claude models released after
+            # Opus 4.6 (April 2026) -- newer models are deterministic-by-
+            # default with no value specified. See docs/DECISION_LOG.md
+            # 2026-07-23.
             system=_SUMMARY_SYSTEM_PROMPT,
             tools=[_RECORD_SUMMARY_TOOL],
             tool_choice={"type": "tool", "name": "record_summary"},
