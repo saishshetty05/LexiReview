@@ -30,7 +30,7 @@ export function SignupPage() {
       // /auth/login does -- so log in immediately with the same
       // credentials rather than sending the user to a second form.
       await loginMutation.mutateAsync({ email, password });
-      markLoggedIn();
+      markLoggedIn(email);
       navigate("/dashboard", { replace: true });
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Something went wrong. Please try again.");

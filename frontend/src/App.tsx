@@ -6,6 +6,9 @@ import { SignupPage } from "@/pages/auth/SignupPage";
 import { DashboardPage } from "@/pages/dashboard/DashboardPage";
 import { UploadPage } from "@/pages/upload/UploadPage";
 import { ReviewPage } from "@/pages/review/ReviewPage";
+import { AccountSettingsPage } from "@/pages/settings/AccountSettingsPage";
+import { TeamSettingsPage } from "@/pages/settings/TeamSettingsPage";
+import { BillingSettingsPage } from "@/pages/settings/BillingSettingsPage";
 import { ProtectedRoute } from "@/components/layout/ProtectedRoute";
 
 export default function App() {
@@ -36,6 +39,30 @@ export default function App() {
         element={
           <ProtectedRoute>
             <ReviewPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/settings"
+        element={
+          <ProtectedRoute>
+            <AccountSettingsPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/settings/team"
+        element={
+          <ProtectedRoute>
+            <TeamSettingsPage />
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/settings/billing"
+        element={
+          <ProtectedRoute>
+            <BillingSettingsPage />
           </ProtectedRoute>
         }
       />

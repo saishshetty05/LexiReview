@@ -7,36 +7,49 @@
 // enforcement (every protected route still 401s for real) -- it just gives
 // the UI a single source of truth to decide what to render before the
 // first request comes back, instead of every page guessing independently.
+//
+// email is stored the same way, for the same reason: POST /auth/login only
+// ever returns {user_id}, never email, so AccountSettingsPage has no other
+// source for it. What's stored is exactly what the user typed into the
+// login/signup form -- accurate as long as it stays true, and there's no
+// email-change endpoint that could make it go stale.
 import { createContext, useContext, useState } from "react";
 
 import { ApiError } from "@/lib/api";
 
 interface AuthContextValue {
   isKnownLoggedIn: boolean;
-  markLoggedIn: () => void;
+  email: string | null;
+  markLoggedIn: (email: string) => void;
   clearSession: () => void;
 }
 
-const STORAGE_KEY = "lexireview-known-logged-in";
+const LOGGED_IN_KEY = "lexireview-known-logged-in";
+const EMAIL_KEY = "lexireview-known-email";
 const AuthContext = createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [isKnownLoggedIn, setIsKnownLoggedIn] = useState(
-    () => localStorage.getItem(STORAGE_KEY) === "true",
+    () => localStorage.getItem(LOGGED_IN_KEY) === "true",
   );
+  const [email, setEmail] = useState<string | null>(() => localStorage.getItem(EMAIL_KEY));
 
-  function markLoggedIn() {
-    localStorage.setItem(STORAGE_KEY, "true");
+  function markLoggedIn(nextEmail: string) {
+    localStorage.setItem(LOGGED_IN_KEY, "true");
+    localStorage.setItem(EMAIL_KEY, nextEmail);
     setIsKnownLoggedIn(true);
+    setEmail(nextEmail);
   }
 
   function clearSession() {
-    localStorage.removeItem(STORAGE_KEY);
+    localStorage.removeItem(LOGGED_IN_KEY);
+    localStorage.removeItem(EMAIL_KEY);
     setIsKnownLoggedIn(false);
+    setEmail(null);
   }
 
   return (
-    <AuthContext.Provider value={{ isKnownLoggedIn, markLoggedIn, clearSession }}>
+    <AuthContext.Provider value={{ isKnownLoggedIn, email, markLoggedIn, clearSession }}>
       {children}
     </AuthContext.Provider>
   );
