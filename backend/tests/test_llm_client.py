@@ -464,3 +464,67 @@ def test_analyze_no_high_inconsistency_for_subordinated_jurisdiction_and_arbitra
         and set(finding["block_ids"]) == {"BLOCK_1", "BLOCK_22"}
     ]
     assert high_inconsistency_for_pair == []
+
+
+def test_analyze_high_inconsistency_when_subordination_target_does_not_resolve(monkeypatch):
+    """Calibration guard flagged in PR #45 review: the prompt must be
+    effect-triggered, not keyword-triggered -- the mere presence of
+    'subject to Clause X' must not be treated as proof of coordination if
+    Clause X doesn't actually resolve the tension. BLOCK_22 here is an
+    unrelated definitions clause, not a carve-out or override, so a
+    'subject to' phrase pointing at it is camouflage, not coordination.
+    Same mocked-response limitation as the sibling test above: this proves
+    analyze() passes a HIGH finding through correctly even in the presence
+    of 'subject to' language, not that the live model produces one --
+    that needs the eval bench, out of scope here."""
+    blocks = [
+        Block(
+            id="BLOCK_1",
+            start=0,
+            end=0,
+            text="Party A shall pay Party B the sum of Rs. 50,000 per month, subject to Clause 22.",
+        ),
+        Block(
+            id="BLOCK_22",
+            start=0,
+            end=0,
+            text='"Business Day" means any day other than a Saturday, Sunday, or public holiday.',
+        ),
+    ]
+    high_finding = [
+        {
+            "category": "inconsistency",
+            "severity": "high",
+            "block_ids": ["BLOCK_1", "BLOCK_22"],
+            "evidence_quote": (
+                "Party A shall pay Party B the sum of Rs. 50,000 per month, subject to "
+                "Clause 22. [...] \"Business Day\" means any day other than a Saturday, "
+                "Sunday, or public holiday."
+            ),
+            "explanation": (
+                "Clause 1's payment obligation is expressed 'subject to Clause 22', but "
+                "Clause 22 is only a definitions clause -- it does not condition, override, "
+                "or carve out anything about the payment obligation. The 'subject to' "
+                "phrase does not resolve any tension here and should not be treated as "
+                "deliberate coordination."
+            ),
+        }
+    ]
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-test")
+    monkeypatch.setattr(
+        llm_client.anthropic,
+        "Anthropic",
+        lambda **kwargs: _FakeAnthropicClient(response=_tool_use_response(high_finding), **kwargs),
+    )
+
+    client = LLMClient(_config(provider="anthropic", synthetic_only=False))
+    result = client.analyze(blocks, pseudonymised=True, is_synthetic=False)
+
+    high_inconsistency_for_pair = [
+        finding
+        for finding in result
+        if finding["category"] == "inconsistency"
+        and finding["severity"] == "high"
+        and set(finding["block_ids"]) == {"BLOCK_1", "BLOCK_22"}
+    ]
+    assert len(high_inconsistency_for_pair) == 1
