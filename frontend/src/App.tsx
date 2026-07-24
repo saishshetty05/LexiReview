@@ -1,18 +1,25 @@
 import { Navigate, Route, Routes } from "react-router-dom";
-import { LoginPage } from "./pages/LoginPage";
+import { LandingPage } from "@/pages/marketing/LandingPage";
+import { PricingPage } from "@/pages/marketing/PricingPage";
+import { LoginPage } from "@/pages/auth/LoginPage";
+import { SignupPage } from "@/pages/auth/SignupPage";
 import { ReviewPage } from "./pages/ReviewPage";
 import { UploadPage } from "./pages/UploadPage";
 
-// No route guards: there's no GET /auth/me to check session state without a
-// request, so an unauthenticated visit to /upload or /review just gets a 401
-// from its first fetch, which those pages catch and redirect to /login from.
+// /upload and /review/:jobId are still the pre-redesign pages (real, working
+// end to end) until their own redesign phases land -- kept mounted so the
+// app stays fully functional at every checkpoint of this rebuild, per the
+// commercial-UI-redesign plan's build order.
 export default function App() {
   return (
     <Routes>
+      <Route path="/" element={<LandingPage />} />
+      <Route path="/pricing" element={<PricingPage />} />
       <Route path="/login" element={<LoginPage />} />
+      <Route path="/signup" element={<SignupPage />} />
       <Route path="/upload" element={<UploadPage />} />
       <Route path="/review/:jobId" element={<ReviewPage />} />
-      <Route path="/" element={<Navigate to="/login" replace />} />
+      <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );
 }
