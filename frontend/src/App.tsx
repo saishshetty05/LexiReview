@@ -5,13 +5,9 @@ import { LoginPage } from "@/pages/auth/LoginPage";
 import { SignupPage } from "@/pages/auth/SignupPage";
 import { DashboardPage } from "@/pages/dashboard/DashboardPage";
 import { UploadPage } from "@/pages/upload/UploadPage";
+import { ReviewPage } from "@/pages/review/ReviewPage";
 import { ProtectedRoute } from "@/components/layout/ProtectedRoute";
-import { ReviewPage } from "./pages/ReviewPage";
 
-// /review/:jobId is still the pre-redesign page (real, working end to end)
-// until its own redesign phase lands -- kept mounted so the app stays fully
-// functional at every checkpoint of this rebuild, per the
-// commercial-UI-redesign plan's build order.
 export default function App() {
   return (
     <Routes>
@@ -35,7 +31,14 @@ export default function App() {
           </ProtectedRoute>
         }
       />
-      <Route path="/review/:jobId" element={<ReviewPage />} />
+      <Route
+        path="/review/:jobId"
+        element={
+          <ProtectedRoute>
+            <ReviewPage />
+          </ProtectedRoute>
+        }
+      />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );
