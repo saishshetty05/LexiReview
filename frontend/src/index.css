@@ -2,6 +2,95 @@
 @tailwind components;
 @tailwind utilities;
 
-body {
-  margin: 0;
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222 47% 11%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 11%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 47% 11%;
+
+    --primary: 222 47% 20%;
+    --primary-foreground: 210 40% 98%;
+
+    --secondary: 210 40% 96%;
+    --secondary-foreground: 222 47% 11%;
+
+    --muted: 210 40% 96%;
+    --muted-foreground: 215 16% 47%;
+
+    --accent: 210 40% 94%;
+    --accent-foreground: 222 47% 11%;
+
+    --destructive: 0 72% 51%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 214 32% 91%;
+    --input: 214 32% 91%;
+    --ring: 222 47% 20%;
+
+    --radius: 0.5rem;
+
+    /* Severity tokens -- one source of truth, shared by SeverityBadge, the
+       summary risk pills, and filter chips (previously duplicated). */
+    --severity-high: 0 72% 51%;
+    --severity-high-foreground: 0 0% 100%;
+    --severity-medium: 32 95% 44%;
+    --severity-medium-foreground: 0 0% 100%;
+    --severity-low: 217 91% 60%;
+    --severity-low-foreground: 0 0% 100%;
+    --severity-info: 215 16% 47%;
+    --severity-info-foreground: 0 0% 100%;
+  }
+
+  .dark {
+    --background: 222 47% 8%;
+    --foreground: 210 40% 98%;
+
+    --card: 222 44% 11%;
+    --card-foreground: 210 40% 98%;
+
+    --popover: 222 44% 11%;
+    --popover-foreground: 210 40% 98%;
+
+    --primary: 210 40% 92%;
+    --primary-foreground: 222 47% 11%;
+
+    --secondary: 217 33% 17%;
+    --secondary-foreground: 210 40% 98%;
+
+    --muted: 217 33% 17%;
+    --muted-foreground: 215 20% 65%;
+
+    --accent: 217 33% 20%;
+    --accent-foreground: 210 40% 98%;
+
+    --destructive: 0 63% 45%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 217 33% 20%;
+    --input: 217 33% 20%;
+    --ring: 210 40% 80%;
+
+    --severity-high: 0 70% 58%;
+    --severity-high-foreground: 0 0% 100%;
+    --severity-medium: 32 90% 55%;
+    --severity-medium-foreground: 222 47% 8%;
+    --severity-low: 217 91% 68%;
+    --severity-low-foreground: 222 47% 8%;
+    --severity-info: 215 20% 65%;
+    --severity-info-foreground: 222 47% 8%;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    margin: 0;
+  }
 }

@@ -328,6 +328,32 @@ job stuck `queued` after a broker failure has no automatic re-drive path
 yet; closing it needs either a `queued -> failed` arrow (contract change)
 or a re-enqueue mechanism, both out of scope here.
 
+## 6. Document file retrieval (v1.6)
+
+`GET /documents/{document_id}/file` — backs the frontend's real
+DocumentViewer (commercial UI redesign; the viewer panel was a literal
+placeholder before this endpoint existed, since nothing ever exposed the raw
+bytes). Protected by `get_current_user`.
+
+DECIDED — resolves the current version first, exactly like §2b's
+`GET /documents/{id}/summary`: `documents` rows for `document_id` are queried
+ordered by `version DESC`, and the highest one is treated as current. This
+is also the anti-enumeration 404 — a nonexistent `document_id` and one owned
+by another user both produce zero visible rows via RLS, one branch, one 404
+— before `storage.fetch_document` (§4) is ever called.
+
+DECIDED — `fetch_document`'s three typed errors (`document_not_found`,
+`version_mismatch`, `object_missing`) are all collapsed to the same generic
+404 here rather than surfaced distinctly, for the same anti-enumeration
+reason §4 documents for `fetch_document`'s own callers: distinguishing them
+in the HTTP response would leak which failure mode occurred for a
+`document_id` the caller doesn't actually own.
+
+Response: raw bytes, `Content-Type` set from `documents.file_type`
+(`pdf` → `application/pdf`, `docx` →
+`application/vnd.openxmlformats-officedocument.wordprocessingml.document`).
+No new storage code — reuses `storage.fetch_document` (§4) as-is.
+
 ## Change log
 
 - v1 (2026-07-13): initial locked version. All DECIDED items chosen from the
@@ -356,3 +382,7 @@ or a re-enqueue mechanism, both out of scope here.
   failure response (502, job left `queued` — §1's state machine has no
   `queued -> failed` arrow, closing that gap is a separate follow-up). No
   changes to any prior section.
+- v1.6 (2026-07-24): added §6, `GET /documents/{id}/file` — reuses
+  `storage.fetch_document` (§4) and the same "resolve current version first"
+  anti-enumeration pattern as §2b's summary endpoint. Backs the commercial
+  UI redesign's real DocumentViewer. No changes to any prior section.

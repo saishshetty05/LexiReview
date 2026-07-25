@@ -31,7 +31,13 @@ from app.db import app_user_session
 from app.jobs import create_queued_job
 from app.models import AnalysisJob, AnalysisResult, Document, DocumentSummary, User
 from app.preflight import PreflightResult, run_preflight
-from app.storage import put_document
+from app.storage import (
+    DocumentNotFoundError,
+    ObjectMissingError,
+    VersionMismatchError,
+    fetch_document,
+    put_document,
+)
 
 app = FastAPI(title="LexiReview API")
 
@@ -264,6 +270,50 @@ def get_document_summary(
     if summary is None:
         raise HTTPException(status_code=404, detail="document summary not found")
     return summary.payload
+
+
+_FILE_CONTENT_TYPES = {
+    "pdf": "application/pdf",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+}
+
+
+@app.get("/documents/{document_id}/file")
+def get_document_file(
+    document_id: uuid.UUID, current: tuple[User, Session] = Depends(get_current_user)
+) -> Response:
+    """Serves the raw file bytes for the document viewer (frontend commercial
+    redesign). Reuses storage.fetch_document -- no new storage code, no
+    schema change.
+
+    Same two-step "resolve current version, then fetch by hash" pattern as
+    get_document_summary immediately above: the current-version lookup is
+    also the anti-enumeration 404 (a nonexistent document_id and one owned
+    by someone else both produce zero visible rows via RLS -- one branch,
+    one 404). fetch_document's own typed errors are re-raised as the same
+    404 rather than leaking which failure mode occurred, for the same
+    anti-enumeration reason CONTRACTS.md §4 documents for its callers.
+    """
+    _user, session = current
+    current_version = (
+        session.execute(
+            select(Document)
+            .where(Document.doc_id == document_id)
+            .order_by(Document.version.desc())
+        )
+        .scalars()
+        .first()
+    )
+    if current_version is None:
+        raise HTTPException(status_code=404, detail="document not found")
+
+    try:
+        contents = fetch_document(document_id, _user.id, current_version.doc_version_hash)
+    except (DocumentNotFoundError, VersionMismatchError, ObjectMissingError) as exc:
+        raise HTTPException(status_code=404, detail="document not found") from exc
+
+    content_type = _FILE_CONTENT_TYPES.get(current_version.file_type, "application/octet-stream")
+    return Response(content=contents, media_type=content_type)
 
 
 # Producer-only Celery client: sends tasks by name without importing

@@ -1,5 +1,6 @@
-import type { Decision } from "../types/decision";
-import type { Finding } from "../types/finding";
+import { Progress } from "@/components/ui/progress";
+import type { Decision } from "@/types/decision";
+import type { Finding } from "@/types/finding";
 
 interface ReviewProgressProps {
   findings: Finding[];
@@ -18,13 +19,18 @@ export function ReviewProgress({ findings, decisions }: ReviewProgressProps) {
     return isUnreviewedUnverified ? count + 1 : count;
   }, 0);
 
+  const percent = findings.length === 0 ? 0 : (reviewedCount / findings.length) * 100;
+
   return (
-    <div className="mb-3">
-      <p className="text-sm font-medium text-slate-700">
-        {reviewedCount} of {findings.length} reviewed
-      </p>
+    <div className="mb-3 flex flex-col gap-1.5">
+      <div className="flex items-center justify-between text-sm font-medium">
+        <span>
+          {reviewedCount} of {findings.length} reviewed
+        </span>
+      </div>
+      <Progress value={percent} />
       {unreviewedUnverifiedCount > 0 && (
-        <p className="text-xs text-amber-700">
+        <p className="text-xs text-severity-medium">
           {unreviewedUnverifiedCount} unverified finding{unreviewedUnverifiedCount === 1 ? "" : "s"}{" "}
           still need{unreviewedUnverifiedCount === 1 ? "s" : ""} your attention
         </p>
