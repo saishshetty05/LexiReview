@@ -16,6 +16,13 @@
     "noEmit": true,
     "jsx": "react-jsx",
 
+    /* Path alias -- required by shadcn/ui's generated import convention.
+       No baseUrl: moduleResolution "bundler" resolves `paths` relative to
+       this file without it, and `baseUrl` is deprecated as of TS 6. */
+    "paths": {
+      "@/*": ["./src/*"]
+    },
+
     /* Linting */
     "noUnusedLocals": true,
     "noUnusedParameters": true,

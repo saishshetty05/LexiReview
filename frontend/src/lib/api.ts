@@ -75,6 +75,23 @@ export function login(email: string, password: string): Promise<LoginResult> {
   });
 }
 
+export interface RegisterResult {
+  user_id: string;
+  email: string;
+}
+
+export function register(email: string, password: string): Promise<RegisterResult> {
+  return request<RegisterResult>("/auth/register", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password }),
+  });
+}
+
+export function deleteAccount(): Promise<{ status: string }> {
+  return request("/auth/account", { method: "DELETE" });
+}
+
 export function logout(): Promise<{ status: string }> {
   return request("/auth/logout", { method: "POST" });
 }
@@ -121,4 +138,36 @@ export async function getDocumentSummary(docId: string): Promise<DocumentSummary
     if (err instanceof ApiError && err.status === 404) return null;
     throw err;
   }
+}
+
+// GET /documents/{id}/file -- backs the real DocumentViewer. Not wrapped by
+// request<T>() since the response is a binary body, not JSON: same
+// credentials/error-shape handling, but resolves to a Blob (+ the
+// Content-Type the backend set from documents.file_type) instead of parsed
+// JSON.
+export interface DocumentFile {
+  blob: Blob;
+  contentType: string;
+}
+
+export async function getDocumentFile(docId: string): Promise<DocumentFile> {
+  const resp = await fetch(`/documents/${docId}/file`, { credentials: "include" });
+  if (!resp.ok) {
+    let category = `http_${resp.status}`;
+    let message = `Request failed (${resp.status}).`;
+    try {
+      const body = await resp.json();
+      const detail = body?.detail;
+      if (typeof detail === "string") message = detail;
+      else if (detail && typeof detail === "object") {
+        category = detail.category ?? category;
+        message = detail.message ?? CATEGORY_MESSAGES[category] ?? message;
+      }
+    } catch {
+      // Non-JSON error body -- keep the generic fallback.
+    }
+    throw new ApiError(resp.status, category, message);
+  }
+  const blob = await resp.blob();
+  return { blob, contentType: resp.headers.get("Content-Type") ?? "application/octet-stream" };
 }
