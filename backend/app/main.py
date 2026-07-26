@@ -9,7 +9,7 @@ import os
 import shutil
 import tempfile
 import uuid
-from typing import Iterator
+from typing import Iterator, Literal
 
 from celery import Celery
 from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
@@ -28,6 +28,7 @@ from app.auth import (
     register,
 )
 from app.db import app_user_session
+from app.decisions import get_decisions_for_findings, upsert_decision
 from app.jobs import create_queued_job
 from app.models import AnalysisJob, AnalysisResult, Document, DocumentSummary, User
 from app.preflight import PreflightResult, run_preflight
@@ -198,8 +199,14 @@ def get_job_findings(
     group sorted by severity (high -> info). Empty list for a job with no
     results yet (queued/running) -- not an error, just nothing to show.
     Same anti-enumeration 404 as get_job.
+
+    CONTRACTS.md §7 (v1.7): each returned object is the stored Findings JSON
+    (§2, unchanged) plus two envelope fields -- `finding_id` (the stable
+    analysis_results.id, since array position alone is too fragile to key a
+    decision on) and `decision` ("pending" if the caller has never recorded
+    one for this finding).
     """
-    _user, session = current
+    user, session = current
     job = session.get(AnalysisJob, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
@@ -216,7 +223,39 @@ def get_job_findings(
         (r for r in results if r.verification != "verified"),
         key=lambda r: _SEVERITY_ORDER.get(r.severity, len(_SEVERITY_ORDER)),
     )
-    return [r.payload for r in (*verified, *unverified)]
+    ordered = (*verified, *unverified)
+    decisions = get_decisions_for_findings(session, user_id=user.id, finding_ids=[r.id for r in ordered])
+    return [
+        {**r.payload, "finding_id": str(r.id), "decision": decisions.get(r.id, "pending")}
+        for r in ordered
+    ]
+
+
+class DecisionRequest(BaseModel):
+    decision: Literal["pending", "accepted", "dismissed"]
+
+
+@app.put("/jobs/{job_id}/findings/{finding_id}/decision")
+def put_finding_decision(
+    job_id: uuid.UUID,
+    finding_id: uuid.UUID,
+    body: DecisionRequest,
+    current: tuple[User, Session] = Depends(get_current_user),
+) -> dict:
+    """CONTRACTS.md §7: upserts the caller's decision for one finding.
+    finding_id must belong to job_id -- checked explicitly, since RLS alone
+    only proves the finding belongs to the caller, not to this job. Same
+    anti-enumeration 404 as get_job/get_job_findings either way.
+    """
+    user, session = current
+    job = session.get(AnalysisJob, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="job not found")
+    finding = session.get(AnalysisResult, finding_id)
+    if finding is None or finding.job_id != job_id:
+        raise HTTPException(status_code=404, detail="finding not found")
+    row = upsert_decision(session, user_id=user.id, finding_id=finding_id, decision=body.decision)
+    return {"finding_id": str(row.finding_id), "decision": row.decision}
 
 
 @app.get("/documents/{document_id}/summary")

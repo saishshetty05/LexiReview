@@ -107,6 +107,24 @@ class AnalysisResult(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
+class Decision(Base):
+    """One row per (user_id, finding_id), per CONTRACTS.md §7 (v1.7). Unlike
+    AnalysisResult, this table is MUTABLE — a reviewer can change their mind
+    — so app_user is granted UPDATE too (migration 006), same pattern as
+    AnalysisJob/User rather than the immutable-artifact tables.
+    """
+
+    __tablename__ = "decisions"
+    __table_args__ = (UniqueConstraint("user_id", "finding_id", name="uq_decisions_user_finding"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+    finding_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("analysis_results.id"), nullable=False)
+    decision: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
 class AuditLog(Base):
     """Content-free audit trail (CLAUDE.md rule 2): metadata only, never
     document text, quotes, findings, or filenames. `ip` is purged after 90

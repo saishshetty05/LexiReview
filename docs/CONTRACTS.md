@@ -354,6 +354,58 @@ Response: raw bytes, `Content-Type` set from `documents.file_type`
 `application/vnd.openxmlformats-officedocument.wordprocessingml.document`).
 No new storage code — reuses `storage.fetch_document` (§4) as-is.
 
+## 7. Reviewer decisions (v1.7)
+
+Closes the PROJECT_STATUS.md §5 open item (PRD FR-13): #47 shipped
+`useDecisions` as a client-side-only localStorage stopgap (per-browser,
+per-`jobId`, no real reviewer identity). This section replaces it with real
+backend persistence.
+
+DECIDED — `GET /jobs/{job_id}/findings` (§3a) response gains two envelope
+fields per finding, merged alongside the existing §2 Findings JSON (which
+is otherwise **unchanged** — this does not touch the LLM-authored schema,
+only the HTTP response wrapper, same principle as other endpoints wrapping
+a stored payload):
+
+- `finding_id`: the finding's stable `analysis_results.id`. Needed because
+  the frontend previously had nothing but array position to key a decision
+  on (`decisions[index]` in the pre-v1.7 `useDecisions` hook) — fragile
+  against any future reordering of the findings list.
+- `decision`: `"pending"` | `"accepted"` | `"dismissed"`, the caller's own
+  decision for that finding. `"pending"` when no row exists yet.
+
+DECIDED — new `decisions` table: `id` uuid PK · `user_id` uuid FK
+(denormalized for RLS, same pattern as `analysis_results`/
+`document_summaries`) · `finding_id` uuid FK → `analysis_results.id` ·
+`decision` text · `created_at` · `updated_at`.
+`UNIQUE(user_id, finding_id)` — one row per reviewer per finding, upserted,
+not append-only. Unlike `analysis_results` (immutable, INSERT-only per §2
+Storage's audit-trail principle — reviewer decisions must never mutate the
+AI's original output), `decisions` itself IS mutable: a reviewer can change
+their mind, so `app_user` is granted `SELECT, INSERT, UPDATE` (no
+`DELETE`), the same pattern as `analysis_jobs`/`users` rather than the
+immutable-artifact tables. `user_id` here doubles as the "reviewer
+identity" FR-13 asks for — it's the real authenticated user from
+`get_current_user`, not a per-browser identifier.
+
+DECIDED — new endpoint `PUT /jobs/{job_id}/findings/{finding_id}/decision`,
+body `{"decision": "pending" | "accepted" | "dismissed"}`. Upserts the
+caller's decision. Same anti-enumeration 404 pattern as `get_job`/
+`get_job_findings`: a nonexistent/not-owned `job_id`, or a `finding_id`
+that doesn't belong to `job_id`, both 404 identically — no distinguishing
+response for either case.
+
+Migration (`decisions` table) and both endpoint changes land in one PR,
+Person B's lane (job/findings routes, per `main.py`'s existing boundary
+comment) — this doesn't touch any ingestion-side table. One exception:
+`delete_account_cascade` (`app/auth.py`, Person A's file) gets a mechanical
+one-line addition to its FK-safe delete order (`decisions` deleted before
+`analysis_results`, since it FKs into it) — not a new design decision,
+just keeping FR-15's cascade complete.
+
+Frontend wiring (`useDecisions` off localStorage onto this API) is a
+separate follow-up PR, after this one merges.
+
 ## Change log
 
 - v1 (2026-07-13): initial locked version. All DECIDED items chosen from the
@@ -386,3 +438,9 @@ No new storage code — reuses `storage.fetch_document` (§4) as-is.
   `storage.fetch_document` (§4) and the same "resolve current version first"
   anti-enumeration pattern as §2b's summary endpoint. Backs the commercial
   UI redesign's real DocumentViewer. No changes to any prior section.
+- v1.7 (2026-07-26): added §7, reviewer decisions (PRD FR-13) — new
+  `decisions` table, `finding_id`/`decision` added to `GET
+  /jobs/{job_id}/findings`'s response envelope, new `PUT
+  /jobs/{job_id}/findings/{finding_id}/decision`. Closes the #47
+  localStorage-stopgap open item. No changes to the §2 Findings JSON schema
+  itself, only its HTTP response wrapper.
