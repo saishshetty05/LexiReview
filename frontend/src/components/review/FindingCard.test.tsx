@@ -6,6 +6,8 @@ import type { Finding } from "@/types/finding";
 
 function makeFinding(overrides: Partial<Finding> = {}): Finding {
   return {
+    finding_id: "finding-1",
+    decision: "pending",
     category: "liability",
     severity: "high",
     block_ids: ["BLOCK_1"],
