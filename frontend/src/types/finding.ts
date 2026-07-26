@@ -1,6 +1,7 @@
 // Mirrors CONTRACTS.md §2 (Findings JSON) exactly -- field names, casing,
 // and allowed values are contract-locked and require both people's sign-off
 // to change.
+import type { Decision } from "@/types/decision";
 
 export type FindingCategory =
   | "termination"
@@ -25,6 +26,10 @@ export type Verification = "verified" | "unverified";
 export type Confidence = "standard" | "needs_review";
 
 export interface Finding {
+  // CONTRACTS.md §7 (v1.7) envelope fields -- not part of the LLM-authored
+  // §2 schema itself, added by GET /jobs/{id}/findings alongside it.
+  finding_id: string;
+  decision: Decision;
   category: FindingCategory;
   severity: Severity;
   /**

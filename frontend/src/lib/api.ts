@@ -2,6 +2,7 @@
 // through the Vite dev proxy (vite.config.ts) as same-origin, credentials:
 // 'include' on every call so the HttpOnly auth cookie rides along -- the
 // token itself is never read or stored client-side, by design (SEC-6).
+import type { Decision } from "../types/decision";
 import type { Finding } from "../types/finding";
 import type { DocumentSummary } from "../types/summary";
 
@@ -126,6 +127,24 @@ export function getJob(jobId: string): Promise<JobStatus> {
 
 export function getJobFindings(jobId: string): Promise<Finding[]> {
   return request<Finding[]>(`/jobs/${jobId}/findings`);
+}
+
+export interface DecisionResult {
+  finding_id: string;
+  decision: Decision;
+}
+
+// CONTRACTS.md §7 (v1.7): upserts the caller's decision for one finding.
+export function putFindingDecision(
+  jobId: string,
+  findingId: string,
+  decision: Decision,
+): Promise<DecisionResult> {
+  return request<DecisionResult>(`/jobs/${jobId}/findings/${findingId}/decision`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ decision }),
+  });
 }
 
 // Returns null on 404 rather than throwing -- CONTRACTS.md §2c: the summary
