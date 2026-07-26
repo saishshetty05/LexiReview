@@ -5,6 +5,8 @@ import type { Finding } from "@/types/finding";
 
 function makeFinding(overrides: Partial<Finding> = {}): Finding {
   return {
+    finding_id: "finding-1",
+    decision: "pending",
     category: "missing_clause",
     severity: "medium",
     block_ids: [],
@@ -18,54 +20,53 @@ function makeFinding(overrides: Partial<Finding> = {}): Finding {
 
 describe("filterFindings", () => {
   it("returns an empty array when findings is null", () => {
-    expect(filterFindings(null, {}, "all")).toEqual([]);
+    expect(filterFindings(null, "all")).toEqual([]);
   });
 
-  it("returns every finding, indexed, for filter='all' regardless of decisions", () => {
-    const findings = [makeFinding(), makeFinding(), makeFinding()];
-    const decisions = { 0: "accepted", 1: "dismissed" } as const;
+  it("returns every finding, unfiltered, for filter='all' regardless of decision", () => {
+    const findings = [
+      makeFinding({ finding_id: "1", decision: "accepted" }),
+      makeFinding({ finding_id: "2", decision: "dismissed" }),
+      makeFinding({ finding_id: "3", decision: "pending" }),
+    ];
 
-    const result = filterFindings(findings, decisions, "all");
-
-    expect(result).toEqual([
-      { finding: findings[0], index: 0 },
-      { finding: findings[1], index: 1 },
-      { finding: findings[2], index: 2 },
-    ]);
+    expect(filterFindings(findings, "all")).toEqual(findings);
   });
 
-  it("treats a finding with no decision entry as 'pending'", () => {
-    const findings = [makeFinding(), makeFinding()];
-    // index 0 has an explicit decision, index 1 has none
-    const decisions = { 0: "accepted" } as const;
+  it("filters to only 'pending' findings", () => {
+    const findings = [
+      makeFinding({ finding_id: "1", decision: "accepted" }),
+      makeFinding({ finding_id: "2", decision: "pending" }),
+    ];
 
-    const result = filterFindings(findings, decisions, "pending");
-
-    expect(result).toEqual([{ finding: findings[1], index: 1 }]);
+    expect(filterFindings(findings, "pending")).toEqual([findings[1]]);
   });
 
-  it("filters to only 'accepted' findings, preserving original index", () => {
-    const findings = [makeFinding(), makeFinding(), makeFinding()];
-    const decisions = { 0: "accepted", 1: "dismissed", 2: "accepted" } as const;
+  it("filters to only 'accepted' findings", () => {
+    const findings = [
+      makeFinding({ finding_id: "1", decision: "accepted" }),
+      makeFinding({ finding_id: "2", decision: "dismissed" }),
+      makeFinding({ finding_id: "3", decision: "accepted" }),
+    ];
 
-    const result = filterFindings(findings, decisions, "accepted");
-
-    expect(result.map((r) => r.index)).toEqual([0, 2]);
+    expect(filterFindings(findings, "accepted")).toEqual([findings[0], findings[2]]);
   });
 
   it("filters to only 'dismissed' findings", () => {
-    const findings = [makeFinding(), makeFinding()];
-    const decisions = { 0: "dismissed", 1: "accepted" } as const;
+    const findings = [
+      makeFinding({ finding_id: "1", decision: "dismissed" }),
+      makeFinding({ finding_id: "2", decision: "accepted" }),
+    ];
 
-    const result = filterFindings(findings, decisions, "dismissed");
-
-    expect(result.map((r) => r.index)).toEqual([0]);
+    expect(filterFindings(findings, "dismissed")).toEqual([findings[0]]);
   });
 
   it("returns an empty array when no finding matches the filter", () => {
-    const findings = [makeFinding(), makeFinding()];
-    const decisions = { 0: "accepted", 1: "accepted" } as const;
+    const findings = [
+      makeFinding({ finding_id: "1", decision: "accepted" }),
+      makeFinding({ finding_id: "2", decision: "accepted" }),
+    ];
 
-    expect(filterFindings(findings, decisions, "dismissed")).toEqual([]);
+    expect(filterFindings(findings, "dismissed")).toEqual([]);
   });
 });

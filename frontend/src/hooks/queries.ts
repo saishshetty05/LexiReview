@@ -4,6 +4,8 @@
 // re-implements request logic.
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
+import type { Decision } from "@/types/decision";
+import type { Finding } from "@/types/finding";
 import {
   type JobStatus,
   deleteAccount,
@@ -13,6 +15,7 @@ import {
   getJobFindings,
   login,
   logout,
+  putFindingDecision,
   register,
   uploadDocument,
 } from "@/lib/api";
@@ -80,6 +83,32 @@ export function useDocumentFileQuery(docId: string | null | undefined, enabled: 
     queryFn: () => getDocumentFile(docId as string),
     enabled: !!docId && enabled,
     staleTime: Infinity, // immutable per document version -- no reason to refetch
+  });
+}
+
+// CONTRACTS.md §7 (v1.7): optimistically updates the cached findings list
+// (the same ["job-findings", jobId] cache useJobFindingsQuery reads) so the
+// UI reflects a decision instantly, then rolls back on failure -- findings
+// carry their own `decision` field now, so there is no separate decisions
+// cache to keep in sync.
+export function useSetFindingDecisionMutation(jobId: string | undefined) {
+  const queryClient = useQueryClient();
+  const queryKey = ["job-findings", jobId];
+
+  return useMutation({
+    mutationFn: ({ findingId, decision }: { findingId: string; decision: Decision }) =>
+      putFindingDecision(jobId as string, findingId, decision),
+    onMutate: async ({ findingId, decision }) => {
+      await queryClient.cancelQueries({ queryKey });
+      const previous = queryClient.getQueryData<Finding[]>(queryKey);
+      queryClient.setQueryData<Finding[]>(queryKey, (old) =>
+        old?.map((f) => (f.finding_id === findingId ? { ...f, decision } : f)),
+      );
+      return { previous };
+    },
+    onError: (_err, _vars, context) => {
+      if (context?.previous) queryClient.setQueryData(queryKey, context.previous);
+    },
   });
 }
 

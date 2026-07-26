@@ -27,7 +27,7 @@ export function ReviewPage() {
   const docId = (location.state as { docId?: string } | null)?.docId ?? null;
 
   const [filter, setFilter] = useState<DecisionFilter>("all");
-  const { decisions, setDecision } = useDecisions(jobId);
+  const { setDecision } = useDecisions(jobId);
 
   const jobQuery = useJobQuery(jobId);
   const job = jobQuery.data;
@@ -46,10 +46,7 @@ export function ReviewPage() {
 
   const findings = findingsQuery.data ?? null;
 
-  const filteredFindings = useMemo(
-    () => filterFindings(findings, decisions, filter),
-    [findings, decisions, filter],
-  );
+  const filteredFindings = useMemo(() => filterFindings(findings, filter), [findings, filter]);
 
   if (authRedirect) return null;
 
@@ -89,7 +86,7 @@ export function ReviewPage() {
             {jobSucceeded && findings !== null && (
               <>
                 {summaryQuery.data && <SummaryHeader summary={summaryQuery.data} />}
-                <ReviewProgress findings={findings} decisions={decisions} />
+                <ReviewProgress findings={findings} />
                 <div className="mb-3">
                   <FilterChips value={filter} onChange={setFilter} />
                 </div>
@@ -97,14 +94,14 @@ export function ReviewPage() {
                   {filteredFindings.length === 0 && (
                     <p className="text-sm text-muted-foreground">No findings match this filter.</p>
                   )}
-                  {filteredFindings.map(({ finding, index }) => (
+                  {filteredFindings.map((finding) => (
                     <FindingCard
-                      key={index}
+                      key={finding.finding_id}
                       finding={finding}
-                      decision={decisions[index] ?? "pending"}
-                      onAccept={() => setDecision(index, "accepted")}
-                      onDismiss={() => setDecision(index, "dismissed")}
-                      onUndo={() => setDecision(index, "pending")}
+                      decision={finding.decision}
+                      onAccept={() => setDecision(finding.finding_id, "accepted")}
+                      onDismiss={() => setDecision(finding.finding_id, "dismissed")}
+                      onUndo={() => setDecision(finding.finding_id, "pending")}
                     />
                   ))}
                 </div>
