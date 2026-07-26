@@ -1,22 +1,10 @@
 import type { DecisionFilter } from "@/components/review/FilterChips";
-import type { Decision } from "@/types/decision";
 import type { Finding } from "@/types/finding";
 
-export interface IndexedFinding {
-  finding: Finding;
-  index: number;
-}
-
-export function filterFindings(
-  findings: Finding[] | null,
-  decisions: Record<number, Decision>,
-  filter: DecisionFilter,
-): IndexedFinding[] {
+// CONTRACTS.md §7 (v1.7): decision now travels directly on each Finding, so
+// no separate decisions map is needed to filter by it.
+export function filterFindings(findings: Finding[] | null, filter: DecisionFilter): Finding[] {
   if (!findings) return [];
-  return findings
-    .map((finding, index) => ({ finding, index }))
-    .filter(({ index }) => {
-      if (filter === "all") return true;
-      return (decisions[index] ?? "pending") === filter;
-    });
+  if (filter === "all") return findings;
+  return findings.filter((finding) => finding.decision === filter);
 }
