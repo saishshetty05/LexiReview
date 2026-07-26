@@ -1,6 +1,7 @@
-"""Tests for pii_gateway.py. This is a pattern-based first cut — structured
-PII only (email/phone/PAN/Aadhaar/SSN). Personal names/addresses are NOT
-covered; see the module docstring."""
+"""Tests for pii_gateway.py: structured PII (regex) plus NER-based
+detection (Presidio + spaCy) for names/locations. Runs against the real
+model, not a mock -- matches this codebase's general preference for real
+behavior over mocks where feasible."""
 
 from __future__ import annotations
 
@@ -44,6 +45,18 @@ def test_aadhaar_is_redacted():
     assert result.redaction_counts == {"AADHAAR": 1}
 
 
+def test_aadhaar_number_is_not_also_double_matched_as_phone():
+    """Regression: an Aadhaar number's first two groups ("1234 5678" inside
+    "1234 5678 9012") also match PHONE's broad digit-group pattern -- with
+    span-collection done independently per pattern (not sequential
+    mutation), this needs explicit overlap resolution or the same real PII
+    item gets counted under two categories. AADHAAR must win (higher
+    priority in _PATTERNS) and the match must appear exactly once."""
+    result = pseudonymise("The Aadhaar number 1234 5678 9012 must be verified.")
+    assert result.redaction_counts == {"AADHAAR": 1}
+    assert result.text.count("[REDACTED_") == 1
+
+
 def test_phone_is_redacted():
     result = pseudonymise("Reach the landlord at +91 98765-43210 for repairs.")
     assert "98765-43210" not in result.text
@@ -79,3 +92,26 @@ def test_no_pii_returns_unmodified_text():
     result = pseudonymise(text)
     assert result.text == text
     assert result.had_redactions is False
+
+
+def test_person_name_is_redacted():
+    result = pseudonymise("This agreement is entered into by John Smith and Priya Sharma.")
+    assert "John Smith" not in result.text
+    assert "Priya Sharma" not in result.text
+    assert "[REDACTED_PERSON]" in result.text
+    assert result.redaction_counts.get("PERSON") == 2
+
+
+def test_location_is_redacted():
+    result = pseudonymise("The parties agree this contract is governed by the laws of India.")
+    assert "India" not in result.text
+    assert "[REDACTED_LOCATION]" in result.text
+    assert result.redaction_counts.get("LOCATION") == 1
+
+
+def test_name_and_structured_pii_in_same_text_both_redacted():
+    text = "Contact John Doe at john.doe@example.com regarding this lease."
+    result = pseudonymise(text)
+    assert "John Doe" not in result.text
+    assert "john.doe@example.com" not in result.text
+    assert result.redaction_counts == {"PERSON": 1, "EMAIL": 1}

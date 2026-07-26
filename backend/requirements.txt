@@ -23,3 +23,11 @@ bandit==1.7.*
 fpdf2==2.*
 moto[s3]==5.*
 anthropic==0.*
+presidio-analyzer==2.2.*
+spacy==3.8.*
+# spaCy's small English model, pinned as a direct wheel URL (not a
+# `python -m spacy download` step) so plain `pip install -r requirements.txt`
+# is sufficient everywhere -- Docker, CI, and a bare venv alike. ci.yml runs
+# pip install directly on the runner, bypassing the Dockerfile entirely; a
+# Dockerfile-only download step would work locally and silently fail in CI.
+en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
