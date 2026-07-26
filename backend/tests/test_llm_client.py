@@ -401,6 +401,23 @@ def test_subordination_language_included_in_system_prompt():
     assert "arbitration" in prompt_lower
 
 
+def test_missing_clause_empty_quote_instruction_in_system_prompt():
+    """Found live: missing_clause findings came back with a non-empty
+    evidence_quote (placeholder text, or the entire document) and non-empty
+    block_ids, violating CONTRACTS.md §2 -- the prompt never actually told
+    the model not to. analysis_pipeline._finalize_finding now normalizes
+    this deterministically regardless (see test_analysis_pipeline.py), but
+    the prompt fix is what stops the model from generating oversized
+    quotes in the first place, which also looked like a contributor to
+    intermittent ANTHROPIC_MAX_TOKENS truncation. Same caveat as the
+    subordination-language test above: catches a revert, not live-model
+    compliance."""
+    prompt_lower = llm_client._SYSTEM_PROMPT.lower()
+    assert "missing_clause" in prompt_lower
+    assert "empty string" in prompt_lower
+    assert "empty array" in prompt_lower
+
+
 def test_analyze_no_high_inconsistency_for_subordinated_jurisdiction_and_arbitration(monkeypatch):
     """Documents the expected finding shape for the false-positive scenario
     (jurisdiction clause 'Subject to Clause 22' + arbitration clause) using

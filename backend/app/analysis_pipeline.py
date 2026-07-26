@@ -95,7 +95,18 @@ def _finalize_finding(source_text: str, finding: dict) -> dict:
 
     if finding["category"] == "missing_clause":
         # CONTRACTS.md §2: no quote to check — the playbook/category check
-        # that produces this finding is itself deterministic.
+        # that produces this finding is itself deterministic. evidence_quote
+        # and block_ids are forced to "" / [] regardless of what the model
+        # returned: the system prompt asks for this, but nothing validates
+        # provider output against CONTRACTS.md, and in practice the model has
+        # filled evidence_quote with placeholder text or the entire document
+        # instead — the latter is also a likely contributor to intermittent
+        # ANTHROPIC_MAX_TOKENS truncation (large quotes repeated across
+        # several missing_clause findings in one response). Same "one layer
+        # that can lie is enough" principle already applied to risk_snapshot
+        # and the rule-7 override — the LLM doesn't own this field.
+        finding["evidence_quote"] = ""
+        finding["block_ids"] = []
         finding["verification"] = "verified"
         finding["confidence"] = "standard"
         return finding
