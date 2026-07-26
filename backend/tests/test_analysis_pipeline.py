@@ -103,6 +103,32 @@ def test_missing_clause_finding_is_always_verified_with_no_quote():
     assert results[0]["confidence"] == "standard"
 
 
+def test_missing_clause_evidence_quote_and_block_ids_forced_empty_regardless_of_llm_output():
+    """Found live: the model sometimes returns a non-empty evidence_quote
+    (placeholder text, or the entire document concatenated) and non-empty
+    block_ids for missing_clause findings, violating CONTRACTS.md §2 --
+    nothing validated provider output against the contract, so it passed
+    straight through to the frontend. Feeds a deliberately misbehaving fake
+    LLM response and asserts _finalize_finding normalizes it regardless,
+    matching the same "LLM doesn't own this field" pattern already applied
+    to risk_snapshot and the rule-7 summary override."""
+    file_bytes = _make_docx_bytes(LEASE_PARAGRAPHS)
+    misbehaving_finding = {
+        **MISSING_CLAUSE_FINDING,
+        "evidence_quote": "This Lease Agreement is entered into between Landlord and Tenant. "
+        "Clause 3: The monthly rent shall be Rs. 50,000...",
+        "block_ids": ["BLOCK_1", "BLOCK_2"],
+    }
+    fake_llm = _FakeLLMClient([misbehaving_finding])
+
+    results = run_analysis(file_bytes, "docx", fake_llm, is_synthetic=True)
+
+    assert results[0]["evidence_quote"] == ""
+    assert results[0]["block_ids"] == []
+    assert results[0]["verification"] == "verified"
+    assert results[0]["confidence"] == "standard"
+
+
 def test_fabricated_quote_is_unverified_and_needs_review():
     file_bytes = _make_docx_bytes(LEASE_PARAGRAPHS)
     fake_llm = _FakeLLMClient([FABRICATED_FINDING])
