@@ -12,6 +12,7 @@ import { Disclaimer } from "@/components/shared/Disclaimer";
 import { useDecisions } from "@/hooks/useDecisions";
 import { useDocumentSummaryQuery, useJobFindingsQuery, useJobQuery } from "@/hooks/queries";
 import { isAuthError } from "@/hooks/useAuth";
+import { filterFindings } from "@/lib/filterFindings";
 
 export function ReviewPage() {
   const { jobId } = useParams<{ jobId: string }>();
@@ -45,15 +46,10 @@ export function ReviewPage() {
 
   const findings = findingsQuery.data ?? null;
 
-  const filteredFindings = useMemo(() => {
-    if (!findings) return [];
-    return findings
-      .map((finding, index) => ({ finding, index }))
-      .filter(({ index }) => {
-        if (filter === "all") return true;
-        return (decisions[index] ?? "pending") === filter;
-      });
-  }, [findings, decisions, filter]);
+  const filteredFindings = useMemo(
+    () => filterFindings(findings, decisions, filter),
+    [findings, decisions, filter],
+  );
 
   if (authRedirect) return null;
 
