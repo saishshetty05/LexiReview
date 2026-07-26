@@ -185,6 +185,7 @@ class CascadeResult:
     analysis_jobs_deleted: int
     analysis_results_deleted: int
     document_summaries_deleted: int
+    decisions_deleted: int
     audit_log_rows_nulled: int
 
 
@@ -194,22 +195,25 @@ def delete_account_cascade(user_id: uuid.UUID) -> CascadeResult:
     !!! THE ONLY CODE PATH IN THIS PROJECT ALLOWED TO CONNECT AS THE OWNER
     ROLE (DATABASE_URL) INSTEAD OF app_user. !!!
     app_user has no DELETE grant on documents/analysis_jobs/analysis_results
-    /document_summaries/audit_log/users BY DESIGN (migration 001/002,
-    docs/DECISION_LOG.md 2026-07-15) -- that is what makes every other table
-    immutable at the DB layer, not just in app code. This function bypasses
-    that deliberately, via a separate privileged connection, because
-    account deletion is the one place immutability must yield to a legal
-    SLA. Do NOT copy this pattern anywhere else; every other read/write in
-    this codebase must go through app_user_session.
+    /document_summaries/decisions/audit_log/users BY DESIGN (migration
+    001/002/006, docs/DECISION_LOG.md 2026-07-15) -- that is what makes
+    every other table immutable at the DB layer, not just in app code (note:
+    decisions is mutable via UPDATE, per migration 006, but still has no
+    DELETE grant). This function bypasses that deliberately, via a separate
+    privileged connection, because account deletion is the one place
+    immutability must yield to a legal SLA. Do NOT copy this pattern
+    anywhere else; every other read/write in this codebase must go through
+    app_user_session.
 
     audit_log rows are NOT deleted (content-free per CLAUDE.md rule 2, IPs
     purged separately after 90 days per FR-8) -- only their user_id
     reference is nulled, so the row survives as an anonymous audit trail
     entry.
 
-    Deletes in FK-safe order, in one transaction: analysis_results ->
-    document_summaries -> analysis_jobs -> documents -> (null audit_log.user_id)
-    -> users.
+    Deletes in FK-safe order, in one transaction: decisions ->
+    analysis_results -> document_summaries -> analysis_jobs -> documents ->
+    (null audit_log.user_id) -> users. `decisions` goes first since it FKs
+    into analysis_results.id (CONTRACTS.md §7, migration 006).
     """
     # NOTE: this reads the raw DATABASE_URL env var directly -- NOT
     # app.db.DATABASE_URL, which despite the name is the app's *resolved
@@ -222,6 +226,9 @@ def delete_account_cascade(user_id: uuid.UUID) -> CascadeResult:
     owner_engine = create_engine(_normalize(owner_url))
     try:
         with owner_engine.begin() as conn:
+            decisions_deleted = conn.execute(
+                text("DELETE FROM decisions WHERE user_id = :uid"), {"uid": user_id}
+            ).rowcount
             results_deleted = conn.execute(
                 text("DELETE FROM analysis_results WHERE user_id = :uid"), {"uid": user_id}
             ).rowcount
@@ -246,5 +253,6 @@ def delete_account_cascade(user_id: uuid.UUID) -> CascadeResult:
         analysis_jobs_deleted=jobs_deleted,
         analysis_results_deleted=results_deleted,
         document_summaries_deleted=summaries_deleted,
+        decisions_deleted=decisions_deleted,
         audit_log_rows_nulled=audit_nulled,
     )
