@@ -291,11 +291,12 @@ the caller (RLS scopes the lookup, same anti-enumeration pattern as
 `fetch_document`) returns 409:
 `{"detail": {"category": "duplicate_document", "message": "...",
 "doc_id": "<existing>", "job_id": "<its most recent job, or null>"}}` — the
-client polls `/jobs/{job_id}` instead of re-uploading. This is an app-level
-SELECT-before-INSERT, not a DB unique constraint; a race between two
-concurrent identical uploads by the same user is a known, accepted gap for
-this version — closing it needs a unique index on
-`(user_id, doc_version_hash)`, a schema change out of scope here.
+client polls `/jobs/{job_id}` instead of re-uploading. The SELECT-before-
+INSERT check above is the common-case path; a `UNIQUE(user_id,
+doc_version_hash)` constraint (migration 007, `uq_documents_user_version`)
+closes the race between two concurrent identical uploads by the same
+user — the losing INSERT's `IntegrityError` is caught and re-resolved to
+the same 409 shown above.
 
 DECIDED — storage-failure rollback: `storage.put_document` is called
 *inside* the same `app_user_session` block as the `documents`/

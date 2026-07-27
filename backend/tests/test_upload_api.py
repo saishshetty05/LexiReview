@@ -14,6 +14,7 @@ from __future__ import annotations
 import io
 import os
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from fastapi.testclient import TestClient
@@ -201,6 +202,55 @@ def test_upload_duplicate_sha256_returns_409_with_existing_doc_id(
 
     # Only the first upload enqueued a task.
     assert recorded_tasks == [("analyze_document", [existing_doc_id, str(user_id)])]
+
+
+def test_upload_concurrent_duplicate_uploads_create_exactly_one_document(
+    pg_owner_engine, cleanup_rows, s3_env, recorded_tasks
+):
+    """FR-6 dedup race (docs/DECISION_LOG.md, 2026-07-20 / migration 007):
+    two concurrent uploads of the identical file by the same user must
+    still produce exactly one `documents` row -- one request wins with 201,
+    the other loses with the same 409 duplicate_document body as the
+    non-concurrent case.
+
+    This reproduces reliably without an artificial synchronization barrier:
+    the winning request's row lock is held from its `session.flush()` in
+    upload_document() until the *end* of its `app_user_session` block --
+    which is after create_queued_job() and the put_document() storage
+    write, not right after the flush. That gives a real, not contrived,
+    window during which the losing thread's own flush() blocks on
+    Postgres's unique-index lock, then raises IntegrityError once the
+    winner commits. Both threads' initial duplicate-check SELECT almost
+    always sees zero rows (neither has committed yet), so both attempt the
+    insert -- guaranteeing exactly one winner.
+    """
+    user_id, auth_cookies = _register_user(pg_owner_engine)
+    cleanup_rows.append(user_id)
+    pdf_bytes = _valid_pdf_bytes()
+
+    def do_upload():
+        return client.post(
+            "/documents/upload",
+            cookies=auth_cookies,
+            files={"file": ("lease.pdf", io.BytesIO(pdf_bytes), "application/pdf")},
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        responses = [future.result() for future in [pool.submit(do_upload) for _ in range(2)]]
+
+    assert sorted(r.status_code for r in responses) == [201, 409]
+
+    winner = next(r for r in responses if r.status_code == 201)
+    loser = next(r for r in responses if r.status_code == 409)
+    loser_detail = loser.json()["detail"]
+    assert loser_detail["category"] == "duplicate_document"
+    assert loser_detail["doc_id"] == winner.json()["doc_id"]
+
+    with pg_owner_engine.connect() as conn:
+        doc_count = conn.execute(
+            text("SELECT count(*) FROM documents WHERE user_id = :id"), {"id": user_id}
+        ).scalar_one()
+    assert doc_count == 1
 
 
 def test_upload_requires_auth(s3_env, recorded_tasks):

@@ -14,7 +14,8 @@ from typing import Iterator, Literal
 from celery import Celery
 from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.auth import (
@@ -411,11 +412,14 @@ def upload_document(
     FR-6 dedup: one documents.doc_version_hash match for the caller (RLS
     scopes the SELECT, no explicit user_id filter needed) returns 409 with
     the existing doc_id + its most recent job_id, so the client can poll
-    /jobs/{job_id} instead of re-uploading. This is an app-level SELECT
-    before INSERT, not a DB unique constraint -- two concurrent uploads of
-    the identical file by the same user could both pass the check. Accepted
-    gap for this PR; closing it needs a unique index on
-    (user_id, doc_version_hash), a schema change out of scope here.
+    /jobs/{job_id} instead of re-uploading. The SELECT-then-INSERT check
+    above is the common-case path; a DB-level UNIQUE(user_id,
+    doc_version_hash) constraint (migration 007) is the actual guarantee.
+    If two concurrent uploads of the identical file by the same user both
+    pass the SELECT, the loser's INSERT raises IntegrityError -- caught
+    below, which re-runs the SELECT (now finding the winner's committed
+    row) and returns the identical 409 body as the common case, so the
+    race path is observationally indistinguishable from it.
     """
     user, _outer_session = current
     contents = file.file.read()
@@ -446,6 +450,27 @@ def upload_document(
     # Document docstring) -- basename strips any path/traversal components.
     sanitized_filename = os.path.basename(file.filename or "upload")
 
+    def _duplicate_document_response(existing_doc: Document, session: Session) -> HTTPException:
+        existing_job = (
+            session.execute(
+                select(AnalysisJob)
+                .where(AnalysisJob.doc_id == existing_doc.doc_id)
+                .order_by(AnalysisJob.created_at.desc())
+                .limit(1)
+            )
+            .scalars()
+            .first()
+        )
+        return HTTPException(
+            status_code=409,
+            detail={
+                "category": "duplicate_document",
+                "message": "A document with this content has already been uploaded.",
+                "doc_id": str(existing_doc.doc_id),
+                "job_id": str(existing_job.id) if existing_job else None,
+            },
+        )
+
     with app_user_session(user.id) as session:
         existing = (
             session.execute(select(Document).where(Document.doc_version_hash == sha256_hash))
@@ -453,25 +478,7 @@ def upload_document(
             .first()
         )
         if existing is not None:
-            existing_job = (
-                session.execute(
-                    select(AnalysisJob)
-                    .where(AnalysisJob.doc_id == existing.doc_id)
-                    .order_by(AnalysisJob.created_at.desc())
-                    .limit(1)
-                )
-                .scalars()
-                .first()
-            )
-            raise HTTPException(
-                status_code=409,
-                detail={
-                    "category": "duplicate_document",
-                    "message": "A document with this content has already been uploaded.",
-                    "doc_id": str(existing.doc_id),
-                    "job_id": str(existing_job.id) if existing_job else None,
-                },
-            )
+            raise _duplicate_document_response(existing, session)
 
         doc_id = uuid.uuid4()
         document = Document(
@@ -486,6 +493,41 @@ def upload_document(
             is_synthetic=False,
         )
         session.add(document)
+        try:
+            # Flush now (rather than letting it ride to the block's final
+            # commit) so a losing concurrent upload's unique-constraint
+            # violation (migration 007) surfaces here, before the job row
+            # or storage write happen -- not after.
+            session.flush()
+        except IntegrityError as exc:
+            session.rollback()
+            # Defensive: this catch exists specifically for the FR-6 dedup
+            # race (migration 007's uq_documents_user_version). If a future
+            # migration adds another unique/check constraint reachable from
+            # this same INSERT, its violation must not be misreported as a
+            # duplicate-document 409 -- re-raise anything else unchanged.
+            constraint = getattr(getattr(exc.orig, "diag", None), "constraint_name", None)
+            if constraint != "uq_documents_user_version":
+                raise
+
+            # SET LOCAL is transaction-scoped (docs/DECISION_LOG.md,
+            # 2026-07-20 / migration 005): rollback() ends the transaction
+            # that set app.user_id, so it must be re-applied before the
+            # session issues another RLS-scoped query, or the fail-closed
+            # policy raises instead of finding the winner's row.
+            session.execute(text(f"SET LOCAL app.user_id = '{uuid.UUID(str(user.id))}'"))
+            existing = (
+                session.execute(select(Document).where(Document.doc_version_hash == sha256_hash))
+                .scalars()
+                .first()
+            )
+            if existing is None:
+                # Defensive: a unique-constraint violation on this exact
+                # column pair with no matching row now would mean something
+                # other than this race caused it. Don't swallow it as a 409.
+                raise
+            raise _duplicate_document_response(existing, session)
+
         job = create_queued_job(
             session, user_id=user.id, doc_id=doc_id, doc_version_hash=sha256_hash
         )
