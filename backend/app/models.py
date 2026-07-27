@@ -45,7 +45,10 @@ class Document(Base):
     """
 
     __tablename__ = "documents"
-    __table_args__ = (UniqueConstraint("doc_id", "version", name="uq_documents_doc_id_version"),)
+    __table_args__ = (
+        UniqueConstraint("doc_id", "version", name="uq_documents_doc_id_version"),
+        UniqueConstraint("user_id", "doc_version_hash", name="uq_documents_user_version"),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     doc_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, default=uuid.uuid4)
