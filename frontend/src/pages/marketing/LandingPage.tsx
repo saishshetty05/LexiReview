@@ -53,7 +53,6 @@ export function LandingPage() {
             <Link to="/signup">Start free</Link>
           </Button>
           <Button size="lg" variant="outline" asChild>
-            <Link to="/pricing">See pricing</Link>
           </Button>
         </div>
         <p className="text-xs text-muted-foreground">

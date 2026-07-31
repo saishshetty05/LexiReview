@@ -46,7 +46,6 @@ export function BillingSettingsPage() {
           </CardContent>
           <CardFooter className="gap-2">
             <Button asChild>
-              <Link to="/pricing">Upgrade plan</Link>
             </Button>
             <TooltipProvider>
               <Tooltip>
