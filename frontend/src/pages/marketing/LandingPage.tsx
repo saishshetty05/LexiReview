@@ -52,8 +52,6 @@ export function LandingPage() {
           <Button size="lg" asChild>
             <Link to="/signup">Start free</Link>
           </Button>
-          <Button size="lg" variant="outline" asChild>
-          </Button>
         </div>
         <p className="text-xs text-muted-foreground">
           AI-generated draft. Not legal advice. Requires attorney review.
