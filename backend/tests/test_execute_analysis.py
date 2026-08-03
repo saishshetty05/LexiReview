@@ -15,6 +15,12 @@ from sqlalchemy import text
 
 from app import worker
 from app.jobs import TransientAnalysisError
+from app.llm_client import (
+    ProviderNotConfiguredError,
+    ProviderResponseError,
+    PseudonymisationRequiredError,
+    SyntheticOnlyViolationError,
+)
 from app.models import AnalysisJob, JobState
 
 _FAKE_REQUEST = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
@@ -234,9 +240,10 @@ def test_execute_analysis_raises_lookup_error_when_document_row_missing(
         anthropic.RateLimitError("rate limited", response=_FAKE_RESPONSE, body=None),
         anthropic.InternalServerError("server error", response=_FAKE_RESPONSE, body=None),
         anthropic.OverloadedError("overloaded", response=_FAKE_RESPONSE, body=None),
+        ProviderResponseError("record_findings.findings was not a list"),
     ],
 )
-def test_execute_analysis_wraps_transient_anthropic_errors(
+def test_execute_analysis_wraps_transient_llm_errors(
     pg_owner_engine, cleanup_rows, monkeypatch, exc
 ):
     user_id, doc_id = uuid.uuid4(), uuid.uuid4()
@@ -258,3 +265,38 @@ def test_execute_analysis_wraps_transient_anthropic_errors(
     with pytest.raises(TransientAnalysisError) as exc_info:
         worker._execute_analysis(job)
     assert exc_info.value.category == "llm_provider_error"
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        PseudonymisationRequiredError(),
+        SyntheticOnlyViolationError("gemini_free"),
+        ProviderNotConfiguredError("anthropic"),
+    ],
+)
+def test_execute_analysis_does_not_wrap_guardrail_refusals(
+    pg_owner_engine, cleanup_rows, monkeypatch, exc
+):
+    """Guardrail refusals are deterministic (same input -> same refusal every
+    time), unlike ProviderResponseError's one-off malformed-shape hiccup --
+    a retry can't fix them, so they must stay terminal, not get swept into
+    _TRANSIENT_LLM_ERRORS by a future, too-broad `except LLMClientError`."""
+    user_id, doc_id = uuid.uuid4(), uuid.uuid4()
+    doc_version_hash = "hash-guardrail-refusal"
+    cleanup_rows.append(user_id)
+    _insert_user(pg_owner_engine, user_id)
+    _insert_document(
+        pg_owner_engine, user_id=user_id, doc_id=doc_id, doc_version_hash=doc_version_hash
+    )
+
+    def _raise(*a, **k):
+        raise exc
+
+    monkeypatch.setattr(worker, "fetch_document", lambda *a, **k: b"bytes")
+    monkeypatch.setattr(worker, "run_analysis", _raise)
+    _stub_llm_client(monkeypatch)
+
+    job = _make_job(pg_owner_engine, user_id=user_id, doc_id=doc_id, doc_version_hash=doc_version_hash)
+    with pytest.raises(type(exc)):
+        worker._execute_analysis(job)

@@ -12,21 +12,28 @@ from app.jobs import (
     MAX_RETRIES, TransientAnalysisError, _format_error, backoff_seconds,
     get_active_job, mark_failed, mark_running, mark_succeeded, mark_transient_failure,
 )
-from app.llm_client import LLMClient, LLMClientError
+from app.llm_client import LLMClient, LLMClientError, ProviderResponseError
 from app.models import AnalysisJob, AnalysisResult, Document, DocumentSummary, JobState
 from app.storage import fetch_document
 
 # Anthropic errors that survive the SDK's own internal retry budget (see
 # llm_client.ANTHROPIC_MAX_RETRIES) still deserve a job-level retry too --
 # the PRD's reliability NFR asks for both a provider-level and a job-level
-# retry layer, not one or the other. Guardrail refusals (LLMClientError and
-# its subclasses) are NOT included here: those are terminal by design, not
-# something a retry could fix.
-_TRANSIENT_ANTHROPIC_ERRORS = (
+# retry layer, not one or the other. Guardrail refusals (PseudonymisationRequiredError,
+# SyntheticOnlyViolationError, ProviderNotConfiguredError, SummaryGuardrailViolationError)
+# are NOT included here: those are deterministic and terminal by design, not
+# something a retry could fix. ProviderResponseError is the one LLMClientError
+# subclass that IS included -- it means the provider replied but not in the
+# expected tool-call shape, which (found live 2026-07-26, docs/DECISION_LOG.md)
+# is a one-off model hiccup, not a property of the document: the identical
+# document, re-queued immediately after an observed failure, succeeded cleanly
+# on the very next call.
+_TRANSIENT_LLM_ERRORS = (
     anthropic.APIConnectionError,  # covers APITimeoutError (subclass)
     anthropic.InternalServerError,
     anthropic.RateLimitError,
     anthropic.OverloadedError,
+    ProviderResponseError,
 )
 
 celery_app = Celery("lexireview", broker=os.environ.get("REDIS_URL", "redis://redis:6379/0"),
@@ -77,7 +84,7 @@ def _execute_analysis(job: AnalysisJob) -> list[dict]:
     llm_client = LLMClient()
     try:
         findings = run_analysis(file_bytes, file_type, llm_client, is_synthetic=is_synthetic)
-    except _TRANSIENT_ANTHROPIC_ERRORS as exc:
+    except _TRANSIENT_LLM_ERRORS as exc:
         raise TransientAnalysisError("llm_provider_error", type(exc).__name__) from exc
 
     with app_user_session(job.user_id) as session:
