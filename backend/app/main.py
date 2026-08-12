@@ -349,10 +349,13 @@ def list_documents(
 
     result = []
     for doc in documents:
-        # Get the most recent job for this document
+        # Get the most recent job for this specific document version.
+        # Scope by doc_version_hash to avoid showing v2's job on a v1 card
+        # when a document has been re-uploaded (same doc_id, different hash).
         latest_job_stmt = (
             select(AnalysisJob)
             .where(AnalysisJob.doc_id == doc.doc_id)
+            .where(AnalysisJob.doc_version_hash == doc.doc_version_hash)
             .order_by(AnalysisJob.created_at.desc())
             .limit(1)
         )
