@@ -34,6 +34,12 @@ class User(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     email: Mapped[str] = mapped_column(String, nullable=False, unique=True)
     password_hash: Mapped[str] = mapped_column(String, nullable=False)
+    # Migration 008: account-metadata-only admin role. is_admin is never
+    # self-serve settable (no endpoint grants it) -- see docs/RUNBOOK.md for
+    # the manual-DB-UPDATE bootstrap. active gates login (auth.authenticate)
+    # and every subsequent request (main.get_current_user), not just login.
+    is_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
@@ -140,6 +146,11 @@ class AuditLog(Base):
     event_type: Mapped[str] = mapped_column(String, nullable=False)
     user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     doc_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    # Migration 008: set only on admin_user_* events, the target account an
+    # admin acted on. No FK, same as doc_id above -- must survive the
+    # target row being deleted (admin_user_deleted logs the action, then
+    # delete_account_cascade removes the row target_user_id points at).
+    target_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
     # INET in Postgres; falls back to a plain string elsewhere for the same
     # SQLite test-portability reason as `payload` above.
     ip: Mapped[str | None] = mapped_column(String().with_variant(INET(), "postgresql"), nullable=True)
