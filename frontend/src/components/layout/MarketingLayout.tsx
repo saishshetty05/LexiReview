@@ -14,9 +14,7 @@ export function MarketingLayout({ children }: { children: React.ReactNode }) {
             LexiReview
           </Link>
           <nav className="hidden items-center gap-6 text-sm font-medium text-muted-foreground sm:flex">
-            <Link to="/pricing" className="hover:text-foreground">
-              Pricing
-            </Link>
+      
           </nav>
           <div className="flex items-center gap-2">
             <ThemeToggle />

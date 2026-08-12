@@ -8,7 +8,6 @@ import { ProtectedRoute } from "@/components/layout/ProtectedRoute";
 // heaviest deps in the app) gets its own chunk instead of all shipping in
 // the initial bundle. Landing/pricing visitors never pay for react-pdf.
 const LandingPage = lazy(() => import("@/pages/marketing/LandingPage").then((m) => ({ default: m.LandingPage })));
-const PricingPage = lazy(() => import("@/pages/marketing/PricingPage").then((m) => ({ default: m.PricingPage })));
 const LoginPage = lazy(() => import("@/pages/auth/LoginPage").then((m) => ({ default: m.LoginPage })));
 const SignupPage = lazy(() => import("@/pages/auth/SignupPage").then((m) => ({ default: m.SignupPage })));
 const DashboardPage = lazy(() => import("@/pages/dashboard/DashboardPage").then((m) => ({ default: m.DashboardPage })));
@@ -37,7 +36,6 @@ export default function App() {
     <Suspense fallback={<RouteFallback />}>
       <Routes>
         <Route path="/" element={<LandingPage />} />
-        <Route path="/pricing" element={<PricingPage />} />
         <Route path="/login" element={<LoginPage />} />
         <Route path="/signup" element={<SignupPage />} />
         <Route
