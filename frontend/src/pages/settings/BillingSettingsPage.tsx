@@ -1,5 +1,3 @@
-import { Link } from "react-router-dom";
-
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
@@ -45,9 +43,6 @@ export function BillingSettingsPage() {
             <Progress value={usagePercent} />
           </CardContent>
           <CardFooter className="gap-2">
-            <Button asChild>
-              <Link to="/pricing">Upgrade plan</Link>
-            </Button>
             <TooltipProvider>
               <Tooltip>
                 <TooltipTrigger asChild>
