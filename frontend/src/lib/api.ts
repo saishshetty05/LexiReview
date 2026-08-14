@@ -6,6 +6,21 @@ import type { Decision } from "../types/decision";
 import type { Finding } from "../types/finding";
 import type { DocumentSummary } from "../types/summary";
 
+export interface DocumentListItem {
+  doc_id: string;
+  original_filename: string;
+  file_type: "pdf" | "docx";
+  page_count: number | null;
+  size_bytes: number;
+  created_at: string;
+  latest_job: {
+    job_id: string;
+    state: "queued" | "running" | "succeeded" | "failed";
+    created_at: string;
+    finished_at: string | null;
+  } | null;
+}
+
 export class ApiError extends Error {
   status: number;
   category: string;
@@ -189,4 +204,8 @@ export async function getDocumentFile(docId: string): Promise<DocumentFile> {
   }
   const blob = await resp.blob();
   return { blob, contentType: resp.headers.get("Content-Type") ?? "application/octet-stream" };
+}
+
+export function getDocuments(): Promise<DocumentListItem[]> {
+  return request<DocumentListItem[]>("/documents");
 }

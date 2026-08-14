@@ -11,6 +11,7 @@ import {
   deleteAccount,
   getDocumentFile,
   getDocumentSummary,
+  getDocuments,
   getJob,
   getJobFindings,
   login,
@@ -125,4 +126,11 @@ export function useLogoutAndInvalidate() {
       }
     },
   };
+}
+
+export function useDocumentsQuery() {
+  return useQuery({
+    queryKey: ["documents"],
+    queryFn: () => getDocuments(),
+  });
 }
