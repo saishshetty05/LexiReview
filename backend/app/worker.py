@@ -8,6 +8,7 @@ from sqlalchemy import select
 
 from app.analysis_pipeline import run_analysis, run_summary
 from app.db import app_user_session
+from app.decisions import get_severity_examples
 from app.jobs import (
     MAX_RETRIES, TransientAnalysisError, _format_error, backoff_seconds,
     get_active_job, mark_failed, mark_running, mark_succeeded, mark_transient_failure,
@@ -73,6 +74,9 @@ def _execute_analysis(job: AnalysisJob) -> list[dict]:
             )
         file_type = document.file_type
         is_synthetic = document.is_synthetic
+        # CONTRACTS.md §7a (v1.8): fetched in the same session/query pass as
+        # the document row, then threaded through to the (DB-free) pipeline.
+        severity_examples = get_severity_examples(session, user_id=job.user_id)
 
     # fetch_document's typed errors (DocumentNotFoundError, VersionMismatchError,
     # ObjectMissingError) are all data-integrity problems, not transient ones --
@@ -83,7 +87,13 @@ def _execute_analysis(job: AnalysisJob) -> list[dict]:
 
     llm_client = LLMClient()
     try:
-        findings = run_analysis(file_bytes, file_type, llm_client, is_synthetic=is_synthetic)
+        findings = run_analysis(
+            file_bytes,
+            file_type,
+            llm_client,
+            is_synthetic=is_synthetic,
+            severity_examples=severity_examples,
+        )
     except _TRANSIENT_LLM_ERRORS as exc:
         raise TransientAnalysisError("llm_provider_error", type(exc).__name__) from exc
 

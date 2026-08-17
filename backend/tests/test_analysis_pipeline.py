@@ -23,9 +23,13 @@ class _FakeLLMClient:
         self.received_blocks = None
         self.received_kwargs: dict | None = None
 
-    def analyze(self, blocks, *, pseudonymised, is_synthetic):
+    def analyze(self, blocks, *, pseudonymised, is_synthetic, severity_examples=None):
         self.received_blocks = blocks
-        self.received_kwargs = {"pseudonymised": pseudonymised, "is_synthetic": is_synthetic}
+        self.received_kwargs = {
+            "pseudonymised": pseudonymised,
+            "is_synthetic": is_synthetic,
+            "severity_examples": severity_examples,
+        }
         return self._findings
 
     def summarize(self, blocks, *, pseudonymised, is_synthetic):
@@ -156,7 +160,11 @@ def test_llm_client_receives_pseudonymised_true_and_the_synthetic_flag():
 
     run_analysis(file_bytes, "docx", fake_llm, is_synthetic=False)
 
-    assert fake_llm.received_kwargs == {"pseudonymised": True, "is_synthetic": False}
+    assert fake_llm.received_kwargs == {
+        "pseudonymised": True,
+        "is_synthetic": False,
+        "severity_examples": None,
+    }
 
 
 def test_multiple_findings_are_each_finalized_independently():
@@ -172,6 +180,26 @@ def test_multiple_findings_are_each_finalized_independently():
         "missing_clause": "verified",
         "liability": "unverified",
     }
+
+
+def test_severity_examples_are_passed_through_to_the_llm_client():
+    """CONTRACTS.md §7a (v1.8): run_analysis stays DB-free -- the caller
+    (worker.py) fetches this user's past overrides and hands them straight
+    through, unmodified, as few-shot guidance."""
+    file_bytes = _make_docx_bytes(LEASE_PARAGRAPHS)
+    fake_llm = _FakeLLMClient([])
+    examples = [
+        {
+            "category": "payment",
+            "evidence_quote": "some prior clause",
+            "original_severity": "high",
+            "severity_override": "medium",
+        }
+    ]
+
+    run_analysis(file_bytes, "docx", fake_llm, is_synthetic=True, severity_examples=examples)
+
+    assert fake_llm.received_kwargs["severity_examples"] == examples
 
 
 def test_original_finding_dicts_passed_by_caller_are_not_mutated():

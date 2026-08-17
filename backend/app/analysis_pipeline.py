@@ -26,17 +26,26 @@ def run_analysis(
     llm_client: LLMClient,
     *,
     is_synthetic: bool,
+    severity_examples: list[dict] | None = None,
 ) -> list[dict]:
     """Extract, redact, anchor, analyze, and verify.
 
     Returns a list of finding dicts matching CONTRACTS.md §2, each with
     `verification`/`confidence` filled in.
+
+    severity_examples (CONTRACTS.md §7a, v1.8): this user's past severity
+    overrides, fetched by the caller (worker.py, which has DB access) and
+    threaded straight through to LLMClient.analyze as few-shot guidance --
+    keeps this function DB-free and testable with a fake LLM client, same
+    seam philosophy as the rest of this module.
     """
     extraction = extract_text(file_bytes, file_type)
     pseudonymised = pseudonymise(extraction.text)
     blocks = make_anchors(pseudonymised.text)
 
-    raw_findings = llm_client.analyze(blocks, pseudonymised=True, is_synthetic=is_synthetic)
+    raw_findings = llm_client.analyze(
+        blocks, pseudonymised=True, is_synthetic=is_synthetic, severity_examples=severity_examples
+    )
     return [_finalize_finding(pseudonymised.text, finding) for finding in raw_findings]
 
 

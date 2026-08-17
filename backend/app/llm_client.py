@@ -198,6 +198,39 @@ def _blocks_to_prompt(blocks: list[Block]) -> str:
     return "\n\n".join(f"[{block.id}]\n{block.text}" for block in blocks)
 
 
+# CONTRACTS.md §7a (v1.8) severity personalization: prompt-based, not
+# embeddings -- see docs/DECISION_LOG.md 2026-08-17. Advisory only, no
+# deterministic post-processing enforces a match (unlike _finalize_finding's
+# handling of missing_clause/verification in analysis_pipeline.py): matching
+# "same meaning, different wording" needs the same judgment the override
+# exists to correct in the first place, so there's no cheap deterministic
+# check available here.
+_SEVERITY_PERSONALIZATION_PREAMBLE = (
+    "This reviewer has previously corrected the severity of findings on "
+    "their own past documents. When a clause in THIS document carries the "
+    "same substantive meaning as one of the examples below -- even if "
+    "worded completely differently, since contracts rarely repeat a clause "
+    "verbatim -- classify it at the reviewer's corrected severity instead "
+    "of whatever you would otherwise assign. Do not apply a correction to "
+    "a clause that is only superficially similar (same category, different "
+    "substance)."
+)
+
+
+def _build_system_prompt(severity_examples: list[dict] | None) -> str:
+    if not severity_examples:
+        return _SYSTEM_PROMPT
+    example_lines = []
+    for example in severity_examples:
+        quote = example["evidence_quote"] or "(no quote -- missing_clause finding)"
+        example_lines.append(
+            f"- category={example['category']!r}: originally rated "
+            f"{example['original_severity']!r}, reviewer corrected to "
+            f"{example['severity_override']!r}. Example clause: {quote!r}"
+        )
+    return "\n\n".join([_SYSTEM_PROMPT, _SEVERITY_PERSONALIZATION_PREAMBLE, *example_lines])
+
+
 # Providers whose free tier may use submitted data for training (CLAUDE.md
 # rule 3): SYNTHETIC_ONLY must be enforced for these, never for paid tiers.
 _FREE_TIER_PROVIDERS = {"gemini_free"}
@@ -322,11 +355,12 @@ class LLMClient:
         *,
         pseudonymised: bool,
         is_synthetic: bool,
+        severity_examples: list[dict] | None = None,
     ) -> list[dict]:
         api_key = self._resolve_api_key(pseudonymised=pseudonymised, is_synthetic=is_synthetic)
 
         if self.config.provider == "anthropic":
-            return self._analyze_anthropic(blocks, api_key)
+            return self._analyze_anthropic(blocks, api_key, severity_examples=severity_examples)
 
         raise NotImplementedError(
             f"LLMClient stub: {self.config.provider!r} guardrails passed but no provider "
@@ -354,7 +388,9 @@ class LLMClient:
             "call is wired up yet"
         )
 
-    def _analyze_anthropic(self, blocks: list[Block], api_key: str) -> list[dict]:
+    def _analyze_anthropic(
+        self, blocks: list[Block], api_key: str, *, severity_examples: list[dict] | None = None
+    ) -> list[dict]:
         client = anthropic.Anthropic(
             api_key=api_key,
             timeout=TIMEOUT_SECONDS,
@@ -370,7 +406,7 @@ class LLMClient:
             # Opus 4.6 (April 2026) -- newer models are deterministic-by-
             # default with no value specified. See docs/DECISION_LOG.md
             # 2026-07-23.
-            system=_SYSTEM_PROMPT,
+            system=_build_system_prompt(severity_examples),
             tools=[_RECORD_FINDINGS_TOOL],
             tool_choice={"type": "tool", "name": "record_findings"},
             messages=[{"role": "user", "content": _blocks_to_prompt(blocks)}],

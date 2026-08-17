@@ -196,6 +196,55 @@ def test_anthropic_analyze_uses_expected_call_params(monkeypatch):
     assert "temperature" not in call_kwargs
 
 
+def test_anthropic_analyze_system_prompt_unchanged_with_no_severity_examples(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-test")
+    created = {}
+
+    def _fake_anthropic(**init_kwargs):
+        instance = _FakeAnthropicClient(response=_tool_use_response([]), **init_kwargs)
+        created["instance"] = instance
+        return instance
+
+    monkeypatch.setattr(llm_client.anthropic, "Anthropic", _fake_anthropic)
+
+    client = LLMClient(_config(provider="anthropic", synthetic_only=False))
+    client.analyze([], pseudonymised=True, is_synthetic=False)
+
+    assert created["instance"].messages.received_kwargs["system"] == llm_client._SYSTEM_PROMPT
+
+
+def test_anthropic_analyze_system_prompt_includes_severity_examples(monkeypatch):
+    """CONTRACTS.md §7a (v1.8): past overrides are appended to the system
+    prompt as few-shot guidance, prompt-based rather than embeddings-based
+    (docs/DECISION_LOG.md 2026-08-17)."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-test")
+    created = {}
+
+    def _fake_anthropic(**init_kwargs):
+        instance = _FakeAnthropicClient(response=_tool_use_response([]), **init_kwargs)
+        created["instance"] = instance
+        return instance
+
+    monkeypatch.setattr(llm_client.anthropic, "Anthropic", _fake_anthropic)
+
+    examples = [
+        {
+            "category": "payment",
+            "evidence_quote": "a prior clause about late fees",
+            "original_severity": "high",
+            "severity_override": "medium",
+        }
+    ]
+    client = LLMClient(_config(provider="anthropic", synthetic_only=False))
+    client.analyze([], pseudonymised=True, is_synthetic=False, severity_examples=examples)
+
+    system_prompt = created["instance"].messages.received_kwargs["system"]
+    assert system_prompt.startswith(llm_client._SYSTEM_PROMPT)
+    assert "a prior clause about late fees" in system_prompt
+    assert "'payment'" in system_prompt
+    assert "'high'" in system_prompt and "'medium'" in system_prompt
+
+
 def test_anthropic_analyze_raises_on_missing_tool_use_block(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-test")
     empty_response = SimpleNamespace(content=[])
