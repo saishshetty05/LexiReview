@@ -74,7 +74,13 @@ def cleanup_rows(pg_owner_engine):
     created_user_ids: list[uuid.UUID] = []
     yield created_user_ids
     with pg_owner_engine.connect() as conn:
-        # analysis_results.job_id FKs to analysis_jobs -- delete children first.
+        # decisions.finding_id FKs to analysis_results, which FKs to
+        # analysis_jobs -- delete children first (same order as
+        # test_decisions.py's cleanup_rows).
+        conn.execute(
+            text("DELETE FROM decisions WHERE user_id = ANY(:ids)"),
+            {"ids": created_user_ids},
+        )
         conn.execute(
             text("DELETE FROM analysis_results WHERE user_id = ANY(:ids)"),
             {"ids": created_user_ids},
@@ -201,7 +207,7 @@ def test_execute_analysis_passes_is_synthetic_from_the_document_row(
 
     received = {}
 
-    def _fake_run_analysis(file_bytes, file_type, llm_client, *, is_synthetic):
+    def _fake_run_analysis(file_bytes, file_type, llm_client, *, is_synthetic, severity_examples=None):
         received["file_type"] = file_type
         received["is_synthetic"] = is_synthetic
         return []
@@ -214,6 +220,76 @@ def test_execute_analysis_passes_is_synthetic_from_the_document_row(
     worker._execute_analysis(job)
 
     assert received == {"file_type": "docx", "is_synthetic": False}
+
+
+def test_execute_analysis_passes_severity_examples_from_past_overrides(
+    pg_owner_engine, cleanup_rows, monkeypatch
+):
+    """CONTRACTS.md §7a (v1.8): a prior finding this user downgraded via
+    severity_override must show up as a few-shot example on the NEXT
+    analysis run for that same user, sourced from decisions+analysis_results,
+    not passed by the caller."""
+    user_id, doc_id = uuid.uuid4(), uuid.uuid4()
+    doc_version_hash = "hash-severity-examples"
+    cleanup_rows.append(user_id)
+    _insert_user(pg_owner_engine, user_id)
+    _insert_document(
+        pg_owner_engine, user_id=user_id, doc_id=doc_id, doc_version_hash=doc_version_hash
+    )
+
+    prior_job = _make_job(
+        pg_owner_engine, user_id=user_id, doc_id=uuid.uuid4(), doc_version_hash="prior-hash"
+    )
+    prior_finding_id = uuid.uuid4()
+    with pg_owner_engine.connect() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO analysis_results "
+                "(id, job_id, user_id, doc_id, doc_version_hash, category, severity, "
+                " verification, confidence, payload, created_at) "
+                "VALUES (:id, :job_id, :user_id, :doc_id, 'other-hash', 'payment', 'high', "
+                " 'verified', 'standard', :payload, now())"
+            ),
+            {
+                "id": prior_finding_id,
+                "job_id": prior_job.id,
+                "user_id": user_id,
+                "doc_id": uuid.uuid4(),
+                "payload": '{"category": "payment", "severity": "high", "block_ids": [], '
+                '"evidence_quote": "prior rent escalation clause", "explanation": "x"}',
+            },
+        )
+        conn.execute(
+            text(
+                "INSERT INTO decisions (id, user_id, finding_id, decision, severity_override, "
+                "created_at, updated_at) "
+                "VALUES (:id, :user_id, :finding_id, 'accepted', 'medium', now(), now())"
+            ),
+            {"id": uuid.uuid4(), "user_id": user_id, "finding_id": prior_finding_id},
+        )
+        conn.commit()
+
+    received = {}
+
+    def _fake_run_analysis(file_bytes, file_type, llm_client, *, is_synthetic, severity_examples=None):
+        received["severity_examples"] = severity_examples
+        return []
+
+    monkeypatch.setattr(worker, "fetch_document", lambda *a, **k: b"bytes")
+    monkeypatch.setattr(worker, "run_analysis", _fake_run_analysis)
+    _stub_llm_client(monkeypatch)
+
+    job = _make_job(pg_owner_engine, user_id=user_id, doc_id=doc_id, doc_version_hash=doc_version_hash)
+    worker._execute_analysis(job)
+
+    assert received["severity_examples"] == [
+        {
+            "category": "payment",
+            "evidence_quote": "prior rent escalation clause",
+            "original_severity": "high",
+            "severity_override": "medium",
+        }
+    ]
 
 
 def test_execute_analysis_raises_lookup_error_when_document_row_missing(

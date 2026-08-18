@@ -124,6 +124,10 @@ class Decision(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
     finding_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("analysis_results.id"), nullable=False)
     decision: Mapped[str] = mapped_column(String, nullable=False)
+    # CONTRACTS.md §7a (v1.8): NULL means "no override," not "override to
+    # nothing." Unconstrained at the DB layer, same pattern as decision/
+    # category/severity elsewhere -- validated at the API layer instead.
+    severity_override: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 

@@ -407,6 +407,71 @@ just keeping FR-15's cascade complete.
 Frontend wiring (`useDecisions` off localStorage onto this API) is a
 separate follow-up PR, after this one merges.
 
+### 7a. Severity personalization (v1.8)
+
+Internship-guide task, not a PRD FR. A reviewer can downgrade/upgrade a
+finding's severity for themselves; future findings on the *same-meaning*
+clause (never verbatim-repeated across contracts) should reflect that
+correction. DECIDED — prompt-based few-shot, not embeddings/pgvector: zero
+new infra, and severity is already an LLM judgment call, not one of the
+fields this pipeline treats as needing a deterministic guarantee
+(verification, risk_snapshot, and the rule-7 override are — severity
+itself isn't). Revisit with embeddings only if eval shows this doesn't
+generalize. See DECISION_LOG.md (this date) for full rationale.
+
+DECIDED — `decisions` gains one nullable column: `severity_override`
+(text, same unconstrained-at-the-DB-layer pattern as `decision`/`category`/
+`severity` elsewhere — validated at the API layer). `NULL` means "no
+override," not "override to nothing." Reuses the existing table/upsert
+pattern rather than a new one: an override is conceptually a reviewer
+decision about a finding, same as accept/dismiss.
+
+DECIDED — `PUT /jobs/{job_id}/findings/{finding_id}/decision` body gains
+an optional `severity_override` key:
+`"high" | "medium" | "low" | "info" | null`, distinct from the key being
+*absent*. Absent leaves any existing override untouched (so accepting/
+dismissing a finding never silently clears a previously-set override).
+Explicit `null` clears an existing override back to the AI's original
+severity. A present enum value sets it. This requires the route to
+distinguish "key not sent" from "key sent as null" (Pydantic
+`model_fields_set`, not a plain `Optional[...] = None` default). The
+response gains a `severity_override` field mirroring the stored value
+(`null` when unset), same "echo back the row's current state" pattern the
+`decision` field already follows.
+
+DECIDED — `GET /jobs/{job_id}/findings` (§7) also gains `severity_override`
+per finding, alongside the existing `decision` field, sourced from the same
+`decisions` row (`null` when the caller has never set one). Without this,
+the write side of this feature would be unreadable on a page reload — a
+future frontend PR needs to show current override state without a second
+endpoint, the same reasoning that put `decision` on this response in v1.7.
+
+DECIDED — before each `LLMClient.analyze()` call, the worker fetches this
+user's most recent overrides (join `decisions` + `analysis_results` on
+`finding_id` where `severity_override IS NOT NULL`, ordered by
+`decisions.updated_at DESC`, **capped at 12**) and passes them into
+`run_analysis`/`analyze()` as few-shot examples: `category`,
+`evidence_quote`, the AI's original `severity`, and the user's
+`severity_override`. This is safe to reuse across documents without a new
+pseudonymisation check: `evidence_quote` as stored is already the
+pseudonymised text the LLM itself returned (`_blocks_to_prompt` only ever
+sees `pseudonymise()`'s output), so replaying a user's own past quotes
+into their own future prompt introduces no new PII exposure. The cap is a
+fixed, non-per-category count (simplicity over per-category coverage
+breadth — revisit if a heavily-corrected category gets crowded out in
+practice). This is advisory, not enforced: no deterministic post-processing
+forces a match, even on an exact-repeat quote — unlike `_finalize_finding`'s
+handling of `missing_clause`/verification, there is no cheap deterministic
+check available here (matching requires the same semantic judgment the
+override exists to correct), so severity remains fully LLM-owned same as
+today, just with better-informed input.
+
+Migration (`decisions.severity_override` column), the endpoint body
+change, and the worker/pipeline/LLM-client wiring are Person B's lane
+(same boundary as §7 itself) — no ingestion-side table touched. Frontend
+UI for setting an override (likely on `FindingCard`, alongside the
+existing accept/dismiss controls) is a separate follow-up PR.
+
 ## Change log
 
 - v1 (2026-07-13): initial locked version. All DECIDED items chosen from the
@@ -445,3 +510,9 @@ separate follow-up PR, after this one merges.
   /jobs/{job_id}/findings/{finding_id}/decision`. Closes the #47
   localStorage-stopgap open item. No changes to the §2 Findings JSON schema
   itself, only its HTTP response wrapper.
+- v1.8 (2026-08-17): added §7a, severity personalization (internship-guide
+  task, not a PRD FR) — `decisions.severity_override` (nullable),
+  `PUT .../decision` body gains an optional `severity_override` key with
+  present/absent/null all meaning something different, and prompt-based
+  (not embeddings) few-shot personalization fed into `LLMClient.analyze()`.
+  No changes to the §2 Findings JSON schema or any prior section.

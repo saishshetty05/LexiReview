@@ -29,7 +29,7 @@ from app.auth import (
     register,
 )
 from app.db import app_user_session
-from app.decisions import get_decisions_for_findings, upsert_decision
+from app.decisions import UNSET, get_decisions_for_findings, upsert_decision
 from app.jobs import create_queued_job
 from app.models import AnalysisJob, AnalysisResult, Document, DocumentSummary, User
 from app.preflight import PreflightResult, run_preflight
@@ -227,13 +227,24 @@ def get_job_findings(
     ordered = (*verified, *unverified)
     decisions = get_decisions_for_findings(session, user_id=user.id, finding_ids=[r.id for r in ordered])
     return [
-        {**r.payload, "finding_id": str(r.id), "decision": decisions.get(r.id, "pending")}
+        {
+            **r.payload,
+            "finding_id": str(r.id),
+            "decision": decisions[r.id].decision if r.id in decisions else "pending",
+            # CONTRACTS.md §7a (v1.8): null when the caller has never set one.
+            "severity_override": decisions[r.id].severity_override if r.id in decisions else None,
+        }
         for r in ordered
     ]
 
 
 class DecisionRequest(BaseModel):
     decision: Literal["pending", "accepted", "dismissed"]
+    # CONTRACTS.md §7a (v1.8): absent (default) leaves an existing override
+    # untouched; explicit null clears it; a value sets it. The route (not
+    # this default) is what tells "absent" apart from "sent as null" --
+    # see put_finding_decision's use of `model_fields_set`.
+    severity_override: Literal["high", "medium", "low", "info"] | None = None
 
 
 @app.put("/jobs/{job_id}/findings/{finding_id}/decision")
@@ -247,6 +258,11 @@ def put_finding_decision(
     finding_id must belong to job_id -- checked explicitly, since RLS alone
     only proves the finding belongs to the caller, not to this job. Same
     anti-enumeration 404 as get_job/get_job_findings either way.
+
+    CONTRACTS.md §7a (v1.8): severity_override is UNSET unless the caller's
+    JSON body actually included the key (model_fields_set) -- a plain
+    Optional[...] = None default couldn't distinguish "not sent" from "sent
+    as null," and those mean different things to upsert_decision.
     """
     user, session = current
     job = session.get(AnalysisJob, job_id)
@@ -255,8 +271,21 @@ def put_finding_decision(
     finding = session.get(AnalysisResult, finding_id)
     if finding is None or finding.job_id != job_id:
         raise HTTPException(status_code=404, detail="finding not found")
-    row = upsert_decision(session, user_id=user.id, finding_id=finding_id, decision=body.decision)
-    return {"finding_id": str(row.finding_id), "decision": row.decision}
+    severity_override = (
+        body.severity_override if "severity_override" in body.model_fields_set else UNSET
+    )
+    row = upsert_decision(
+        session,
+        user_id=user.id,
+        finding_id=finding_id,
+        decision=body.decision,
+        severity_override=severity_override,
+    )
+    return {
+        "finding_id": str(row.finding_id),
+        "decision": row.decision,
+        "severity_override": row.severity_override,
+    }
 
 
 @app.get("/documents/{document_id}/summary")

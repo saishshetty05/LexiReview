@@ -112,7 +112,11 @@ def test_put_decision_inserts_then_updates(pg_owner_engine, cleanup_rows):
         cookies=auth_cookies,
     )
     assert accept_resp.status_code == 200
-    assert accept_resp.json() == {"finding_id": str(finding_id), "decision": "accepted"}
+    assert accept_resp.json() == {
+        "finding_id": str(finding_id),
+        "decision": "accepted",
+        "severity_override": None,
+    }
 
     findings_resp = client.get(f"/jobs/{job_id}/findings", cookies=auth_cookies)
     assert findings_resp.json()[0]["decision"] == "accepted"
@@ -199,3 +203,121 @@ def test_put_decision_requires_auth_cookie(pg_owner_engine, cleanup_rows):
         f"/jobs/{uuid.uuid4()}/findings/{uuid.uuid4()}/decision", json={"decision": "accepted"}
     )
     assert resp.status_code == 401
+
+
+# ── severity_override (CONTRACTS.md §7a, v1.8) ──────────────────────────
+
+
+def test_put_decision_sets_severity_override(pg_owner_engine, cleanup_rows):
+    doc_id, job_id = uuid.uuid4(), uuid.uuid4()
+    user_id, auth_cookies = _register_user(pg_owner_engine)
+    cleanup_rows.append(user_id)
+    _insert_job(pg_owner_engine, job_id=job_id, user_id=user_id, doc_id=doc_id)
+    finding_id = _insert_finding(pg_owner_engine, job_id=job_id, user_id=user_id, doc_id=doc_id)
+
+    resp = client.put(
+        f"/jobs/{job_id}/findings/{finding_id}/decision",
+        json={"decision": "accepted", "severity_override": "medium"},
+        cookies=auth_cookies,
+    )
+
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "finding_id": str(finding_id),
+        "decision": "accepted",
+        "severity_override": "medium",
+    }
+
+
+def test_put_decision_omitting_severity_override_leaves_it_untouched(pg_owner_engine, cleanup_rows):
+    """Absent key != explicit null: a later accept/dismiss-only call must not
+    silently clear a previously-set override."""
+    doc_id, job_id = uuid.uuid4(), uuid.uuid4()
+    user_id, auth_cookies = _register_user(pg_owner_engine)
+    cleanup_rows.append(user_id)
+    _insert_job(pg_owner_engine, job_id=job_id, user_id=user_id, doc_id=doc_id)
+    finding_id = _insert_finding(pg_owner_engine, job_id=job_id, user_id=user_id, doc_id=doc_id)
+
+    client.put(
+        f"/jobs/{job_id}/findings/{finding_id}/decision",
+        json={"decision": "accepted", "severity_override": "low"},
+        cookies=auth_cookies,
+    )
+    resp = client.put(
+        f"/jobs/{job_id}/findings/{finding_id}/decision",
+        json={"decision": "dismissed"},
+        cookies=auth_cookies,
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["severity_override"] == "low"
+
+
+def test_put_decision_explicit_null_clears_severity_override(pg_owner_engine, cleanup_rows):
+    doc_id, job_id = uuid.uuid4(), uuid.uuid4()
+    user_id, auth_cookies = _register_user(pg_owner_engine)
+    cleanup_rows.append(user_id)
+    _insert_job(pg_owner_engine, job_id=job_id, user_id=user_id, doc_id=doc_id)
+    finding_id = _insert_finding(pg_owner_engine, job_id=job_id, user_id=user_id, doc_id=doc_id)
+
+    client.put(
+        f"/jobs/{job_id}/findings/{finding_id}/decision",
+        json={"decision": "accepted", "severity_override": "low"},
+        cookies=auth_cookies,
+    )
+    resp = client.put(
+        f"/jobs/{job_id}/findings/{finding_id}/decision",
+        json={"decision": "accepted", "severity_override": None},
+        cookies=auth_cookies,
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["severity_override"] is None
+
+
+def test_put_decision_rejects_invalid_severity_override(pg_owner_engine, cleanup_rows):
+    doc_id, job_id = uuid.uuid4(), uuid.uuid4()
+    user_id, auth_cookies = _register_user(pg_owner_engine)
+    cleanup_rows.append(user_id)
+    _insert_job(pg_owner_engine, job_id=job_id, user_id=user_id, doc_id=doc_id)
+    finding_id = _insert_finding(pg_owner_engine, job_id=job_id, user_id=user_id, doc_id=doc_id)
+
+    resp = client.put(
+        f"/jobs/{job_id}/findings/{finding_id}/decision",
+        json={"decision": "accepted", "severity_override": "critical"},
+        cookies=auth_cookies,
+    )
+    assert resp.status_code == 422
+
+
+def test_get_job_findings_exposes_severity_override(pg_owner_engine, cleanup_rows):
+    doc_id, job_id = uuid.uuid4(), uuid.uuid4()
+    user_id, auth_cookies = _register_user(pg_owner_engine)
+    cleanup_rows.append(user_id)
+    _insert_job(pg_owner_engine, job_id=job_id, user_id=user_id, doc_id=doc_id)
+    finding_id = _insert_finding(pg_owner_engine, job_id=job_id, user_id=user_id, doc_id=doc_id)
+
+    client.put(
+        f"/jobs/{job_id}/findings/{finding_id}/decision",
+        json={"decision": "accepted", "severity_override": "medium"},
+        cookies=auth_cookies,
+    )
+    resp = client.get(f"/jobs/{job_id}/findings", cookies=auth_cookies)
+
+    assert resp.status_code == 200
+    [finding] = resp.json()
+    assert finding["severity_override"] == "medium"
+
+
+def test_get_job_findings_severity_override_null_when_unset(pg_owner_engine, cleanup_rows):
+    doc_id, job_id = uuid.uuid4(), uuid.uuid4()
+    user_id, auth_cookies = _register_user(pg_owner_engine)
+    cleanup_rows.append(user_id)
+    _insert_job(pg_owner_engine, job_id=job_id, user_id=user_id, doc_id=doc_id)
+    _insert_finding(pg_owner_engine, job_id=job_id, user_id=user_id, doc_id=doc_id)
+
+    resp = client.get(f"/jobs/{job_id}/findings", cookies=auth_cookies)
+
+    assert resp.status_code == 200
+    [finding] = resp.json()
+    assert finding["severity_override"] is None
