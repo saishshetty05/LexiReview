@@ -341,6 +341,77 @@ def get_document_summary(
     return summary.payload
 
 
+@app.get("/documents")
+def list_documents(
+    current: tuple[User, Session] = Depends(get_current_user)
+) -> list[dict]:
+    """Returns the 5 most recent documents for the current user, each with
+    its latest analysis job state. Ordered by document creation time descending.
+
+    Response shape:
+    [
+      {
+        "doc_id": "...",
+        "original_filename": "...",
+        "file_type": "pdf" | "docx",
+        "page_count": 10,
+        "size_bytes": 12345,
+        "created_at": "...",
+        "latest_job": {
+          "job_id": "...",
+          "state": "succeeded" | "failed" | "queued" | "running",
+          "created_at": "...",
+          "finished_at": "..." | null
+        } | null
+      },
+      ...
+    ]
+    """
+    _user, session = current
+    # RLS scopes this query automatically via app_user_session
+    stmt = (
+        select(Document)
+        .order_by(Document.created_at.desc())
+        .limit(5)
+    )
+    documents = session.execute(stmt).scalars().all()
+
+    result = []
+    for doc in documents:
+        # Get the most recent job for this specific document version.
+        # Scope by doc_version_hash to avoid showing v2's job on a v1 card
+        # when a document has been re-uploaded (same doc_id, different hash).
+        latest_job_stmt = (
+            select(AnalysisJob)
+            .where(AnalysisJob.doc_id == doc.doc_id)
+            .where(AnalysisJob.doc_version_hash == doc.doc_version_hash)
+            .order_by(AnalysisJob.created_at.desc())
+            .limit(1)
+        )
+        latest_job = session.execute(latest_job_stmt).scalar_one_or_none()
+
+        job_info = None
+        if latest_job is not None:
+            job_info = {
+                "job_id": str(latest_job.id),
+                "state": latest_job.state,
+                "created_at": latest_job.created_at.isoformat(),
+                "finished_at": latest_job.finished_at.isoformat() if latest_job.finished_at else None,
+            }
+
+        result.append({
+            "doc_id": str(doc.doc_id),
+            "original_filename": doc.original_filename,
+            "file_type": doc.file_type,
+            "page_count": doc.page_count,
+            "size_bytes": doc.size_bytes,
+            "created_at": doc.created_at.isoformat(),
+            "latest_job": job_info,
+        })
+
+    return result
+
+
 _FILE_CONTENT_TYPES = {
     "pdf": "application/pdf",
     "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
