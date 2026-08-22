@@ -407,6 +407,7 @@ just keeping FR-15's cascade complete.
 Frontend wiring (`useDecisions` off localStorage onto this API) is a
 separate follow-up PR, after this one merges.
 
+<<<<<<< Updated upstream
 ### 7a. Severity personalization (v1.8)
 
 Internship-guide task, not a PRD FR. A reviewer can downgrade/upgrade a
@@ -471,6 +472,49 @@ change, and the worker/pipeline/LLM-client wiring are Person B's lane
 (same boundary as §7 itself) — no ingestion-side table touched. Frontend
 UI for setting an override (likely on `FindingCard`, alongside the
 existing accept/dismiss controls) is a separate follow-up PR.
+=======
+## 8. MFA (TOTP) authentication (v1.8)
+
+Opt-in, never mandatory. Adds two columns to `users` (migration 008):
+- `mfa_secret` — VARCHAR, nullable, base32-encoded TOTP secret
+- `mfa_enabled` — BOOLEAN NOT NULL DEFAULT FALSE
+
+### Endpoints
+
+| Endpoint | Auth | Body | Success | Errors |
+|---|---|---|---|---|
+| `POST /auth/mfa/setup` | access_token cookie | — | 200 `{"qr_code_base64": "...", "backup_code": "SECRET"}` | 400 `mfa_already_enabled` |
+| `POST /auth/mfa/verify-setup` | access_token cookie | `{"code": "123456"}` | 200 `{"status": "mfa_enabled"}` | 400 `mfa_already_enabled` \| `mfa_not_configured`; 401 `invalid_mfa_code` |
+| `POST /auth/mfa/disable` | access_token cookie | `{"code": "123456"}` | 200 `{"status": "mfa_disabled"}` | 400 `mfa_not_enabled` \| `mfa_not_configured`; 401 `invalid_mfa_code` |
+| `POST /auth/mfa/challenge` | none (mfa_token in body) | `{"mfa_token": "...", "code": "123456"}` | 200 `{"user_id": "..."}` + access_token cookie | 401 `invalid_token` \| `invalid_mfa_code`; 429 `mfa_rate_limited` |
+
+### Modified login flow
+
+`POST /auth/login` for a user with `mfa_enabled=true` no longer returns an access token cookie. Instead it returns:
+```json
+{"mfa_required": true, "mfa_token": "<short-lived JWT>"}
+```
+The `mfa_pending` token is a 5-minute JWT with claims `sub=<user_id>`, `mfa_pending=true`, `jti=<unique_id>`. It is **only** valid for `/auth/mfa/challenge` — `get_current_user` explicitly rejects it.
+
+### Rate limiting
+
+`/auth/mfa/challenge` is rate-limited to 5 attempts per `mfa_pending` token (scoped by its `jti` claim), backed by Redis with TTL matching the token's 5-minute expiry. Exceeding the limit returns 429 `mfa_rate_limited` and invalidates the token; the user must re-login to get a fresh `mfa_token`.
+
+### QR code format
+
+`/auth/mfa/setup` returns a base64-encoded PNG QR code. The embedded URI follows the standard otpauth format:
+```
+otpauth://totp/LexiReview:{email}?secret={secret}&issuer=LexiReview
+```
+Compatible with Google Authenticator, Authy, 1Password, etc.
+
+### Security notes
+
+- The TOTP secret is stored encrypted at rest only in the sense that `app_user` has no SELECT grant on other users' rows (RLS). There is no application-level encryption of the secret column; it is base32 plaintext in the DB.
+- `mfa_pending` tokens are short-lived (5 min) and single-use for the challenge flow.
+- On successful challenge, the attempt counter is cleared and a real 15-minute access token is issued.
+- On rate limit, the `mfa_pending` token is invalidated — even a valid TOTP code will not work until the user logs in again.
+>>>>>>> Stashed changes
 
 ## Change log
 

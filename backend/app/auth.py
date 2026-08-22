@@ -10,6 +10,11 @@ short-lived (15 min); once expired, the client must log in again. A refresh
 token (rotating, stored server-side or as a second HttpOnly cookie) should be
 added before this ships to real users, so a 15-minute session isn't the
 actual UX.
+
+MFA (TOTP) — opt-in, never mandatory. Uses pyotp for TOTP generation/
+verification, qrcode[pil] for QR image. mfa_pending token is a short-lived
+JWT (5 min) with custom claim mfa_pending=true; only valid for the
+/auth/mfa/challenge endpoint, never for get_current_user.
 """
 from __future__ import annotations
 
@@ -22,6 +27,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import jwt
+import pyotp
 from passlib.hash import bcrypt
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.exc import IntegrityError
@@ -75,6 +81,22 @@ class InvalidTokenError(AuthError):
     category = "invalid_token"
 
 
+# ── MFA errors ────────────────────────────────────────────────────────────────
+
+class MFARequiredError(AuthError):
+    """Raised by login when the user has MFA enabled — caller must complete
+    the challenge step before receiving an access token."""
+    category = "mfa_required"
+
+
+class InvalidMFACodeError(AuthError):
+    category = "invalid_mfa_code"
+
+
+class MFARateLimitedError(AuthError):
+    category = "mfa_rate_limited"
+
+
 def _validate_email(email: str) -> None:
     if not _EMAIL_RE.match(email):
         raise InvalidEmailError("email is not a valid address")
@@ -114,6 +136,66 @@ def decode_access_token(token: str) -> uuid.UUID:
     """
     try:
         payload = jwt.decode(token, os.environ["JWT_SECRET"], algorithms=[JWT_ALGORITHM])
+        return uuid.UUID(payload["sub"])
+    except (jwt.PyJWTError, KeyError, ValueError) as exc:
+        raise InvalidTokenError("token is missing, expired, or invalid") from exc
+
+
+# ── MFA (TOTP) helpers ──────────────────────────────────────────────────────
+
+MFA_PENDING_TTL_MINUTES = 5
+
+
+def generate_mfa_secret() -> str:
+    """Generate a new base32-encoded TOTP secret."""
+    return pyotp.random_base32()
+
+
+def build_totp_uri(secret: str, email: str) -> str:
+    """Build an otpauth:// URI for the QR code.
+
+    Format: otpauth://totp/LexiReview:{email}?secret={secret}&issuer=LexiReview
+    """
+    return f"otpauth://totp/LexiReview:{email}?secret={secret}&issuer=LexiReview"
+
+
+def verify_totp_code(secret: str, code: str, *, valid_window: int = 1) -> bool:
+    """Verify a 6-digit TOTP code against the secret.
+
+    valid_window=1 allows ±1 time step (30s each) for clock skew.
+    """
+    totp = pyotp.TOTP(secret)
+    return totp.verify(code, valid_window=valid_window)
+
+
+def create_mfa_pending_token(user_id: uuid.UUID) -> str:
+    """Create a short-lived JWT for the MFA challenge flow.
+
+    Claims: sub=user_id, mfa_pending=true, jti=unique_id, exp=now+5min
+    This token is ONLY valid for /auth/mfa/challenge — get_current_user
+    explicitly rejects it.
+    """
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": str(user_id),
+        "mfa_pending": True,
+        "jti": str(uuid.uuid4()),
+        "iat": now,
+        "exp": now + timedelta(minutes=MFA_PENDING_TTL_MINUTES),
+    }
+    return jwt.encode(payload, os.environ["JWT_SECRET"], algorithm=JWT_ALGORITHM)
+
+
+def decode_mfa_pending_token(token: str) -> uuid.UUID:
+    """Validate and decode an mfa_pending token.
+
+    Raises InvalidTokenError if missing, expired, tampered, or missing
+    the mfa_pending=true claim. Returns the user_id on success.
+    """
+    try:
+        payload = jwt.decode(token, os.environ["JWT_SECRET"], algorithms=[JWT_ALGORITHM])
+        if payload.get("mfa_pending") is not True:
+            raise InvalidTokenError("token is missing, expired, or invalid")
         return uuid.UUID(payload["sub"])
     except (jwt.PyJWTError, KeyError, ValueError) as exc:
         raise InvalidTokenError("token is missing, expired, or invalid") from exc
