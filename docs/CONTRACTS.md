@@ -482,10 +482,16 @@ Opt-in, never mandatory. Adds two columns to `users` (migration 009):
 
 | Endpoint | Auth | Body | Success | Errors |
 |---|---|---|---|---|
-| `POST /auth/mfa/setup` | access_token cookie | — | 200 `{"qr_code_base64": "...", "backup_code": "SECRET"}` | 400 `mfa_already_enabled` |
+| `POST /auth/mfa/setup` | access_token cookie | — | 200 `{"qr_code_base64": "...", "totp_secret": "SECRET"}` | 400 `mfa_already_enabled` |
+| `GET /auth/mfa/status` | access_token cookie | — | 200 `{"mfa_enabled": bool, "mfa_configured": bool}` | 401 `missing_token` \| `invalid_token` (standard auth errors, no MFA-specific failure mode) |
 | `POST /auth/mfa/verify-setup` | access_token cookie | `{"code": "123456"}` | 200 `{"status": "mfa_enabled"}` | 400 `mfa_already_enabled` \| `mfa_not_configured`; 401 `invalid_mfa_code` |
 | `POST /auth/mfa/disable` | access_token cookie | `{"code": "123456"}` | 200 `{"status": "mfa_disabled"}` | 400 `mfa_not_enabled` \| `mfa_not_configured`; 401 `invalid_mfa_code` |
 | `POST /auth/mfa/challenge` | none (mfa_token in body) | `{"mfa_token": "...", "code": "123456"}` | 200 `{"user_id": "..."}` + access_token cookie | 401 `invalid_token` \| `invalid_mfa_code`; 429 `mfa_rate_limited` |
+
+`mfa_configured` is `true` exactly when `mfa_secret IS NOT NULL` — that includes the
+in-progress window after `/setup` but before `/verify-setup` completes, not just the
+fully-enabled state. A caller wanting "is MFA actually protecting this account" should
+check `mfa_enabled`, not `mfa_configured`.
 
 ### Modified login flow
 
@@ -558,3 +564,27 @@ Compatible with Google Authenticator, Authy, 1Password, etc.
   present/absent/null all meaning something different, and prompt-based
   (not embeddings) few-shot personalization fed into `LLMClient.analyze()`.
   No changes to the §2 Findings JSON schema or any prior section.
+- v1.9 (2026-08-23, backfilled 2026-08-23): added §8, TOTP-based MFA
+  (internship-guide task, not a PRD FR) — opt-in, never mandatory;
+  `users.mfa_secret`/`mfa_enabled` (migration 009); `POST
+  /auth/mfa/setup|verify-setup|disable|challenge`; a modified login flow
+  returning `{"mfa_required": true, "mfa_token": ...}` instead of the access
+  cookie for an MFA-enabled user; `/auth/mfa/challenge` rate-limited to 5
+  attempts per token `jti` via Redis. Landed in #67 with the §8 heading
+  already tagged `(v1.9)`, but this change-log entry itself was never added
+  in that PR — backfilled here, in the same PR that also fixes the two
+  drift bugs below, rather than split across two docs-only PRs. No changes
+  to any prior section.
+- v1.10 (2026-08-23): two corrections to §8, both found while syncing
+  CONTRACTS.md against what #70's frontend review actually turned up (the
+  same class of gap: this file said one thing, the running API did
+  another). (1) `POST /auth/mfa/setup`'s response field was documented as
+  `backup_code`; the shipped field (`main.py`'s `MFASetupResponse`) has
+  always been `totp_secret` — `backup_code` was the pre-review name #67's
+  own review caught and renamed (PROJECT_STATUS.md §2), but this file was
+  never updated to match, which is very likely why #70's first draft typed
+  the frontend response as `{qr_code, secret}` instead of the real shape.
+  (2) added the `GET /auth/mfa/status` row — a new read-only endpoint #70
+  added (to fix `AccountSettingsPage`'s hardcoded-disabled-state bug) that
+  shipped without a contract update at the time. No schema change, no
+  changes to any other section.
