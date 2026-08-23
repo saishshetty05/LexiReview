@@ -1,5 +1,6 @@
 import { useSetFindingDecisionMutation } from "@/hooks/queries";
 import type { Decision } from "@/types/decision";
+import type { Severity } from "@/types/finding";
 
 // CONTRACTS.md §7 (v1.7): decisions are now persisted server-side and
 // travel on each Finding (finding.decision, from GET /jobs/{id}/findings) --
@@ -8,8 +9,8 @@ import type { Decision } from "@/types/decision";
 export function useDecisions(jobId: string | undefined) {
   const mutation = useSetFindingDecisionMutation(jobId);
 
-  function setDecision(findingId: string, decision: Decision) {
-    mutation.mutate({ findingId, decision });
+  function setDecision(findingId: string, decision: Decision, severityOverride?: Severity | null) {
+    mutation.mutate({ findingId, decision, severityOverride });
   }
 
   return { setDecision };

@@ -102,6 +102,9 @@ export function ReviewPage() {
                       onAccept={() => setDecision(finding.finding_id, "accepted")}
                       onDismiss={() => setDecision(finding.finding_id, "dismissed")}
                       onUndo={() => setDecision(finding.finding_id, "pending")}
+                      onSeverityOverrideChange={(severityOverride) =>
+                        setDecision(finding.finding_id, finding.decision, severityOverride)
+                      }
                     />
                   ))}
                 </div>

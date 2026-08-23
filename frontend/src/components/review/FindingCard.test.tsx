@@ -10,6 +10,7 @@ function makeFinding(overrides: Partial<Finding> = {}): Finding {
     decision: "pending",
     category: "liability",
     severity: "high",
+    severity_override: null,
     block_ids: ["BLOCK_1"],
     evidence_quote: "the quote text",
     explanation: "why this matters",
@@ -29,6 +30,7 @@ describe("FindingCard", () => {
         onAccept={onAccept}
         onDismiss={vi.fn()}
         onUndo={vi.fn()}
+        onSeverityOverrideChange={vi.fn()}
       />,
     );
 
@@ -47,6 +49,7 @@ describe("FindingCard", () => {
         onAccept={onAccept}
         onDismiss={vi.fn()}
         onUndo={vi.fn()}
+        onSeverityOverrideChange={vi.fn()}
       />,
     );
 
@@ -65,6 +68,7 @@ describe("FindingCard", () => {
         onAccept={onAccept}
         onDismiss={vi.fn()}
         onUndo={vi.fn()}
+        onSeverityOverrideChange={vi.fn()}
       />,
     );
 
@@ -84,6 +88,7 @@ describe("FindingCard", () => {
         onAccept={onAccept}
         onDismiss={vi.fn()}
         onUndo={vi.fn()}
+        onSeverityOverrideChange={vi.fn()}
       />,
     );
 
@@ -103,6 +108,7 @@ describe("FindingCard", () => {
         onAccept={onAccept}
         onDismiss={vi.fn()}
         onUndo={vi.fn()}
+        onSeverityOverrideChange={vi.fn()}
       />,
     );
 
@@ -123,6 +129,7 @@ describe("FindingCard", () => {
         onAccept={vi.fn()}
         onDismiss={vi.fn()}
         onUndo={vi.fn()}
+        onSeverityOverrideChange={vi.fn()}
       />,
     );
 
@@ -140,6 +147,7 @@ describe("FindingCard", () => {
         onAccept={vi.fn()}
         onDismiss={onDismiss}
         onUndo={vi.fn()}
+        onSeverityOverrideChange={vi.fn()}
       />,
     );
 
@@ -157,6 +165,7 @@ describe("FindingCard", () => {
         onAccept={vi.fn()}
         onDismiss={vi.fn()}
         onUndo={onUndo}
+        onSeverityOverrideChange={vi.fn()}
       />,
     );
 
@@ -174,6 +183,7 @@ describe("FindingCard", () => {
         onAccept={vi.fn()}
         onDismiss={vi.fn()}
         onUndo={onUndo}
+        onSeverityOverrideChange={vi.fn()}
       />,
     );
 
@@ -190,9 +200,43 @@ describe("FindingCard", () => {
         onAccept={vi.fn()}
         onDismiss={vi.fn()}
         onUndo={vi.fn()}
+        onSeverityOverrideChange={vi.fn()}
       />,
     );
 
     expect(screen.getByText(/unverified/i)).toBeInTheDocument();
+  });
+
+  it("shows the neutral 'Override severity' control when no override is set", () => {
+    render(
+      <FindingCard
+        finding={makeFinding({ severity_override: null })}
+        decision="pending"
+        onAccept={vi.fn()}
+        onDismiss={vi.fn()}
+        onUndo={vi.fn()}
+        onSeverityOverrideChange={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Override severity")).toBeInTheDocument();
+  });
+
+  it("shows the reviewer's override distinctly from the AI's original severity", () => {
+    render(
+      <FindingCard
+        finding={makeFinding({ severity: "high", severity_override: "low" })}
+        decision="pending"
+        onAccept={vi.fn()}
+        onDismiss={vi.fn()}
+        onUndo={vi.fn()}
+        onSeverityOverrideChange={vi.fn()}
+      />,
+    );
+
+    // AI's original call stays visible on its own badge...
+    expect(screen.getByText("High")).toBeInTheDocument();
+    // ...alongside the reviewer's override, not merged into it.
+    expect(screen.getByText("Your override: Low")).toBeInTheDocument();
   });
 });

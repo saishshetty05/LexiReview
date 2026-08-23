@@ -33,6 +33,12 @@ export interface Finding {
   category: FindingCategory;
   severity: Severity;
   /**
+   * CONTRACTS.md §7a (v1.8): the reviewer's correction to `severity`, or
+   * `null` if none has been set. `severity` itself is always the AI's
+   * original judgment -- never mutated by an override.
+   */
+  severity_override: Severity | null;
+  /**
    * CONTRACTS.md §2: EXACTLY 2 for category="inconsistency", exactly 1
    * otherwise, EMPTY for category="missing_clause" (there is nothing to
    * point at -- the finding is about absence). Do not "helpfully" backfill

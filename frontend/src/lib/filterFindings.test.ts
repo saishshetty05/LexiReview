@@ -9,6 +9,7 @@ function makeFinding(overrides: Partial<Finding> = {}): Finding {
     decision: "pending",
     category: "missing_clause",
     severity: "medium",
+    severity_override: null,
     block_ids: [],
     evidence_quote: "",
     explanation: "test finding",
