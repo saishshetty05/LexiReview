@@ -15,6 +15,7 @@ function makeFinding(overrides: Partial<Finding> = {}): Finding {
     decision: "pending",
     category: "missing_clause",
     severity: "medium",
+    severity_override: null,
     block_ids: [],
     evidence_quote: "",
     explanation: "test finding",
@@ -105,5 +106,55 @@ describe("useDecisions", () => {
     await waitFor(() =>
       expect(putFindingDecisionMock).toHaveBeenCalledWith("job-1", "f1", "pending"),
     );
+  });
+
+  it("passes severityOverride through to the request and the optimistic cache update", async () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    queryClient.setQueryData(
+      ["job-findings", "job-1"],
+      [makeFinding({ finding_id: "f1", decision: "pending", severity_override: null })],
+    );
+    putFindingDecisionMock.mockResolvedValue({ finding_id: "f1", decision: "pending", severity_override: "high" });
+
+    const { result } = renderHook(() => useDecisions("job-1"), {
+      wrapper: makeWrapper(queryClient),
+    });
+
+    act(() => {
+      result.current.setDecision("f1", "pending", "high");
+    });
+
+    await waitFor(() => {
+      const cached = queryClient.getQueryData<Finding[]>(["job-findings", "job-1"]);
+      expect(cached?.find((f) => f.finding_id === "f1")?.severity_override).toBe("high");
+    });
+    expect(putFindingDecisionMock).toHaveBeenCalledWith("job-1", "f1", "pending", "high");
+  });
+
+  it("omitting severityOverride (accept/dismiss/undo) leaves any existing override untouched", async () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    queryClient.setQueryData(
+      ["job-findings", "job-1"],
+      [makeFinding({ finding_id: "f1", decision: "pending", severity_override: "high" })],
+    );
+    putFindingDecisionMock.mockResolvedValue({ finding_id: "f1", decision: "accepted" });
+
+    const { result } = renderHook(() => useDecisions("job-1"), {
+      wrapper: makeWrapper(queryClient),
+    });
+
+    act(() => {
+      result.current.setDecision("f1", "accepted");
+    });
+
+    await waitFor(() => {
+      const cached = queryClient.getQueryData<Finding[]>(["job-findings", "job-1"]);
+      expect(cached?.find((f) => f.finding_id === "f1")?.decision).toBe("accepted");
+    });
+    expect(
+      queryClient.getQueryData<Finding[]>(["job-findings", "job-1"])?.find((f) => f.finding_id === "f1")
+        ?.severity_override,
+    ).toBe("high");
+    expect(putFindingDecisionMock).toHaveBeenCalledWith("job-1", "f1", "accepted");
   });
 });

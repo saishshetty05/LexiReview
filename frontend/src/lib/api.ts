@@ -3,7 +3,7 @@
 // 'include' on every call so the HttpOnly auth cookie rides along -- the
 // token itself is never read or stored client-side, by design (SEC-6).
 import type { Decision } from "../types/decision";
-import type { Finding } from "../types/finding";
+import type { Finding, Severity } from "../types/finding";
 import type { DocumentSummary } from "../types/summary";
 
 export interface DocumentListItem {
@@ -147,18 +147,27 @@ export function getJobFindings(jobId: string): Promise<Finding[]> {
 export interface DecisionResult {
   finding_id: string;
   decision: Decision;
+  severity_override: Severity | null;
 }
 
-// CONTRACTS.md §7 (v1.7): upserts the caller's decision for one finding.
+// CONTRACTS.md §7 (v1.7) / §7a (v1.8): upserts the caller's decision for one
+// finding. severityOverride is tri-state on the wire: omitted here (the
+// default) leaves any existing override untouched, `null` clears it, a
+// value sets it -- distinguished by whether the argument was passed at all,
+// same "absent vs. sent as null" split the backend makes via
+// model_fields_set (see put_finding_decision in main.py).
 export function putFindingDecision(
   jobId: string,
   findingId: string,
   decision: Decision,
+  severityOverride?: Severity | null,
 ): Promise<DecisionResult> {
+  const body: { decision: Decision; severity_override?: Severity | null } = { decision };
+  if (severityOverride !== undefined) body.severity_override = severityOverride;
   return request<DecisionResult>(`/jobs/${jobId}/findings/${findingId}/decision`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ decision }),
+    body: JSON.stringify(body),
   });
 }
 

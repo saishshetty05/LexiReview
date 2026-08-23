@@ -3,11 +3,20 @@ import { useEffect, useRef, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { CategoryBadge } from "@/components/shared/CategoryBadge";
 import { SeverityBadge } from "@/components/shared/SeverityBadge";
+import { SEVERITY_LABEL, SEVERITY_ORDER } from "@/lib/severity";
 import { cn } from "@/lib/utils";
 import type { Decision } from "@/types/decision";
-import type { Finding } from "@/types/finding";
+import type { Finding, Severity } from "@/types/finding";
+
+// Sentinel for "no override" -- Radix Select can't carry a null/empty
+// value (and toggling the root `value` prop between a string and
+// `undefined` would flip the component between controlled/uncontrolled),
+// so this stands in for null on the wire between this component and Select,
+// mapped back to null in the change handler.
+const NO_OVERRIDE = "__none__";
 
 interface FindingCardProps {
   finding: Finding;
@@ -15,9 +24,17 @@ interface FindingCardProps {
   onAccept: () => void;
   onDismiss: () => void;
   onUndo: () => void;
+  onSeverityOverrideChange: (severity: Severity | null) => void;
 }
 
-export function FindingCard({ finding, decision, onAccept, onDismiss, onUndo }: FindingCardProps) {
+export function FindingCard({
+  finding,
+  decision,
+  onAccept,
+  onDismiss,
+  onUndo,
+  onSeverityOverrideChange,
+}: FindingCardProps) {
   const isUnverified = finding.verification === "unverified";
   const [confirmingAccept, setConfirmingAccept] = useState(false);
   const confirmButtonRef = useRef<HTMLButtonElement>(null);
@@ -71,6 +88,41 @@ export function FindingCard({ finding, decision, onAccept, onDismiss, onUndo }: 
         <div className="mb-2 flex flex-wrap items-center gap-2">
           <CategoryBadge category={finding.category} />
           <SeverityBadge severity={finding.severity} />
+          {/* CONTRACTS.md §7a (v1.8): a reviewer's correction to `severity`,
+              shown as its own control rather than edited in place on the AI
+              badge above -- the AI's original call stays visible since it's
+              also what gets fed back into future few-shot prompts. */}
+          <Select
+            value={finding.severity_override ?? NO_OVERRIDE}
+            onValueChange={(value) =>
+              onSeverityOverrideChange(value === NO_OVERRIDE ? null : (value as Severity))
+            }
+          >
+            <SelectTrigger
+              className={cn(
+                "h-auto w-auto gap-1 rounded-full border-dashed px-2.5 py-0.5 text-xs font-semibold shadow-none [&>svg]:h-3 [&>svg]:w-3",
+                finding.severity_override
+                  ? "border-solid border-primary/40 text-primary"
+                  : "text-muted-foreground",
+              )}
+            >
+              <SelectValue placeholder="Override severity">
+                {finding.severity_override ? `Your override: ${SEVERITY_LABEL[finding.severity_override]}` : "Override severity"}
+              </SelectValue>
+            </SelectTrigger>
+            <SelectContent>
+              {finding.severity_override && (
+                <SelectItem value={NO_OVERRIDE} className="text-muted-foreground">
+                  Clear override
+                </SelectItem>
+              )}
+              {SEVERITY_ORDER.map((sev) => (
+                <SelectItem key={sev} value={sev}>
+                  {SEVERITY_LABEL[sev]}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
           {finding.block_ids.map((blockId) => (
             <span
               key={blockId}

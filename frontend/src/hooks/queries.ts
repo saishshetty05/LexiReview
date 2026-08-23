@@ -5,7 +5,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import type { Decision } from "@/types/decision";
-import type { Finding } from "@/types/finding";
+import type { Finding, Severity } from "@/types/finding";
 import {
   type JobStatus,
   deleteAccount,
@@ -97,13 +97,27 @@ export function useSetFindingDecisionMutation(jobId: string | undefined) {
   const queryKey = ["job-findings", jobId];
 
   return useMutation({
-    mutationFn: ({ findingId, decision }: { findingId: string; decision: Decision }) =>
-      putFindingDecision(jobId as string, findingId, decision),
-    onMutate: async ({ findingId, decision }) => {
+    mutationFn: ({
+      findingId,
+      decision,
+      severityOverride,
+    }: {
+      findingId: string;
+      decision: Decision;
+      severityOverride?: Severity | null;
+    }) =>
+      severityOverride === undefined
+        ? putFindingDecision(jobId as string, findingId, decision)
+        : putFindingDecision(jobId as string, findingId, decision, severityOverride),
+    onMutate: async ({ findingId, decision, severityOverride }) => {
       await queryClient.cancelQueries({ queryKey });
       const previous = queryClient.getQueryData<Finding[]>(queryKey);
       queryClient.setQueryData<Finding[]>(queryKey, (old) =>
-        old?.map((f) => (f.finding_id === findingId ? { ...f, decision } : f)),
+        old?.map((f) =>
+          f.finding_id === findingId
+            ? { ...f, decision, ...(severityOverride !== undefined && { severity_override: severityOverride }) }
+            : f,
+        ),
       );
       return { previous };
     },
