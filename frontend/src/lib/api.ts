@@ -50,6 +50,11 @@ const CATEGORY_MESSAGES: Record<string, string> = {
   invalid_password: "Password must be 8-72 characters.",
   missing_token: "You're not logged in.",
   invalid_token: "Your session has expired. Please log in again.",
+  mfa_already_enabled: "Two-factor authentication is already enabled.",
+  mfa_not_enabled: "Two-factor authentication is not enabled.",
+  mfa_not_configured: "Two-factor authentication is not configured.",
+  invalid_mfa_code: "Invalid authentication code. Please try again.",
+  mfa_rate_limited: "Too many failed attempts. Please wait a few minutes and try again.",
 };
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
@@ -97,8 +102,8 @@ export function login(email: string, password: string): Promise<LoginResult> {
 }
 
 export interface MFASetupResult {
-  qr_code: string; // base64 PNG
-  secret: string; // raw TOTP secret (base32) for manual entry
+  qr_code_base64: string; // base64 PNG
+  totp_secret: string; // raw TOTP secret (base32) for manual entry
 }
 
 export function mfaSetup(): Promise<MFASetupResult> {
@@ -115,6 +120,15 @@ export function mfaVerifySetup(body: MFAVerifySetupRequest): Promise<{ status: s
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+}
+
+export interface MFAStatusResult {
+  mfa_enabled: boolean;
+  mfa_configured: boolean;
+}
+
+export function mfaStatus(): Promise<MFAStatusResult> {
+  return request<MFAStatusResult>("/auth/mfa/status");
 }
 
 export interface MFADisableRequest {

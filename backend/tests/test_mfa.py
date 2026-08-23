@@ -399,3 +399,62 @@ def test_mfa_challenge_missing_mfa_secret_returns_401(pg_owner_engine):
     )
     assert challenge_resp.status_code == 401
     assert challenge_resp.json()["detail"]["category"] == "invalid_token"
+
+
+def test_mfa_status_returns_disabled_for_new_user(pg_owner_engine):
+    """GET /auth/mfa/status returns mfa_enabled=false, mfa_configured=false for new user."""
+    user_id, email, auth_cookies = _register_and_login()
+
+    status_resp = client.get("/auth/mfa/status", cookies=auth_cookies)
+    assert status_resp.status_code == 200
+    data = status_resp.json()
+    assert data["mfa_enabled"] is False
+    assert data["mfa_configured"] is False
+
+
+def test_mfa_status_returns_configured_after_setup(pg_owner_engine):
+    """GET /auth/mfa/status returns mfa_configured=true after setup but before verify."""
+    user_id, email, auth_cookies = _register_and_login()
+
+    setup_resp = client.post("/auth/mfa/setup", cookies=auth_cookies)
+    assert setup_resp.status_code == 200
+
+    status_resp = client.get("/auth/mfa/status", cookies=auth_cookies)
+    assert status_resp.status_code == 200
+    data = status_resp.json()
+    assert data["mfa_enabled"] is False
+    assert data["mfa_configured"] is True
+
+
+def test_mfa_status_returns_enabled_after_verify(pg_owner_engine):
+    """GET /auth/mfa/status returns mfa_enabled=true after successful verify-setup."""
+    user_id, email, auth_cookies = _register_and_login()
+    _enable_mfa_for_user(user_id, email, auth_cookies)
+
+    status_resp = client.get("/auth/mfa/status", cookies=auth_cookies)
+    assert status_resp.status_code == 200
+    data = status_resp.json()
+    assert data["mfa_enabled"] is True
+    assert data["mfa_configured"] is True
+
+
+def test_mfa_status_returns_disabled_after_disable(pg_owner_engine):
+    """GET /auth/mfa/status returns mfa_enabled=false after disable."""
+    user_id, email, auth_cookies = _register_and_login()
+    secret = _enable_mfa_for_user(user_id, email, auth_cookies)
+
+    # Disable MFA
+    totp = pyotp.TOTP(secret)
+    valid_code = totp.now()
+    disable_resp = client.post(
+        "/auth/mfa/disable",
+        json={"code": valid_code},
+        cookies=auth_cookies
+    )
+    assert disable_resp.status_code == 200
+
+    status_resp = client.get("/auth/mfa/status", cookies=auth_cookies)
+    assert status_resp.status_code == 200
+    data = status_resp.json()
+    assert data["mfa_enabled"] is False
+    assert data["mfa_configured"] is False

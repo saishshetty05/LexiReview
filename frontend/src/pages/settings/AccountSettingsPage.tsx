@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { Button } from "@/components/ui/button";
@@ -16,7 +16,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { SettingsLayout } from "@/pages/settings/SettingsLayout";
 import { useAuth } from "@/hooks/useAuth";
-import { useDeleteAccountMutation, useLogoutAndInvalidate, useMFASetupMutation, useMFAVerifySetupMutation, useMFADisableMutation } from "@/hooks/queries";
+import { useDeleteAccountMutation, useLogoutAndInvalidate, useMFASetupMutation, useMFAVerifySetupMutation, useMFADisableMutation, useMFAStatusQuery } from "@/hooks/queries";
 import { toast } from "sonner";
 
 type MFAState = "disabled" | "setup_qr" | "setup_verify" | "enabled";
@@ -29,11 +29,19 @@ export function AccountSettingsPage() {
   const mfaSetupMutation = useMFASetupMutation();
   const mfaVerifySetupMutation = useMFAVerifySetupMutation();
   const mfaDisableMutation = useMFADisableMutation();
+  const mfaStatusQuery = useMFAStatusQuery();
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [mfaState, setMfaState] = useState<MFAState>("disabled");
   const [qrCode, setQrCode] = useState<string | null>(null);
   const [totpSecret, setTotpSecret] = useState<string | null>(null);
   const [mfaCode, setMfaCode] = useState("");
+
+  // Initialize mfaState from actual MFA status
+  useEffect(() => {
+    if (mfaStatusQuery.data) {
+      setMfaState(mfaStatusQuery.data.mfa_enabled ? "enabled" : "disabled");
+    }
+  }, [mfaStatusQuery.data]);
 
   async function handleLogout() {
     try {
@@ -56,8 +64,8 @@ export function AccountSettingsPage() {
   async function handleEnableMfa() {
     try {
       const result = await mfaSetupMutation.mutateAsync();
-      setQrCode(result.qr_code);
-      setTotpSecret(result.secret);
+      setQrCode(result.qr_code_base64);
+      setTotpSecret(result.totp_secret);
       setMfaState("setup_qr");
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to start MFA setup. Please try again.");

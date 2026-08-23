@@ -19,6 +19,7 @@ import {
   mfaChallenge,
   mfaDisable,
   mfaSetup,
+  mfaStatus,
   mfaVerifySetup,
   putFindingDecision,
   register,
@@ -169,4 +170,11 @@ export function useMFADisableMutation() {
 
 export function useMFAChallengeMutation() {
   return useMutation({ mutationFn: mfaChallenge });
+}
+
+export function useMFAStatusQuery() {
+  return useQuery({
+    queryKey: ["mfa-status"],
+    queryFn: mfaStatus,
+  });
 }

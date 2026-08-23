@@ -207,6 +207,18 @@ def auth_mfa_setup(current: tuple[User, Session] = Depends(get_current_user)) ->
     return MFASetupResponse(qr_code_base64=qr_base64, totp_secret=secret)
 
 
+@app.get("/auth/mfa/status")
+def auth_mfa_status(
+    current: tuple[User, Session] = Depends(get_current_user)
+) -> dict:
+    """Return current MFA status for the authenticated user."""
+    user, _ = current
+    return {
+        "mfa_enabled": user.mfa_enabled,
+        "mfa_configured": user.mfa_secret is not None,
+    }
+
+
 @app.post("/auth/mfa/verify-setup")
 def auth_mfa_verify_setup(
     body: MFAVerifySetupRequest,
