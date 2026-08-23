@@ -22,12 +22,19 @@ from app.auth import (
     ACCESS_TOKEN_TTL_MINUTES,
     AuthError,
     InvalidTokenError,
+    MFARateLimitedError,
     authenticate,
+    build_totp_uri,
     create_access_token,
+    create_mfa_pending_token,
     decode_access_token,
+    decode_mfa_pending_token,
     delete_account_cascade,
+    generate_mfa_secret,
     register,
+    verify_totp_code,
 )
+from app.mfa_redis import check_and_increment_challenge_attempt, clear_challenge_attempts
 from app.db import app_user_session
 from app.decisions import UNSET, get_decisions_for_findings, upsert_decision
 from app.jobs import create_queued_job
@@ -55,6 +62,9 @@ _AUTH_ERROR_STATUS = {
     "invalid_credentials": 401,
     "rate_limited": 429,
     "invalid_token": 401,
+    "mfa_required": 200,      # not an error — login returns mfa_required flag
+    "invalid_mfa_code": 401,
+    "mfa_rate_limited": 429,
 }
 
 
@@ -71,6 +81,28 @@ class RegisterRequest(BaseModel):
 class LoginRequest(BaseModel):
     email: str
     password: str
+
+
+# ── MFA request/response models ────────────────────────────────────────────
+
+class MFASetupResponse(BaseModel):
+    qr_code_base64: str
+    # This is the raw TOTP secret (base32) for manual entry into authenticator apps.
+    # It is NOT a one-time recovery/backup code. Named 'totp_secret' to avoid confusion.
+    totp_secret: str
+
+
+class MFAVerifySetupRequest(BaseModel):
+    code: str  # 6-digit TOTP
+
+
+class MFADisableRequest(BaseModel):
+    code: str  # 6-digit TOTP
+
+
+class MFAChallengeRequest(BaseModel):
+    mfa_token: str
+    code: str  # 6-digit TOTP
 
 
 def _set_access_cookie(response: Response, token: str) -> None:
@@ -132,9 +164,123 @@ def auth_login(body: LoginRequest, response: Response) -> dict:
         user = authenticate(body.email, body.password)
     except AuthError as exc:
         raise _auth_error_response(exc) from exc
+
+    # MFA-enabled user: return mfa_pending token instead of access token
+    if user.mfa_enabled:
+        mfa_token = create_mfa_pending_token(user.id)
+        return {"mfa_required": True, "mfa_token": mfa_token}
+
+    # Non-MFA user: normal flow
     token = create_access_token(user.id)
     _set_access_cookie(response, token)
     return {"user_id": str(user.id)}
+
+
+@app.post("/auth/mfa/setup")
+def auth_mfa_setup(current: tuple[User, Session] = Depends(get_current_user)) -> MFASetupResponse:
+    """Generate a new TOTP secret and return QR code + backup code.
+
+    Does NOT enable MFA yet — caller must complete /auth/mfa/verify-setup
+    with a valid TOTP code first. This proves the authenticator app works
+    before we lock MFA on.
+    """
+    user, session = current
+    if user.mfa_enabled:
+        raise HTTPException(status_code=400, detail={"category": "mfa_already_enabled"})
+
+    secret = generate_mfa_secret()
+    # Store secret temporarily (mfa_enabled still FALSE)
+    user.mfa_secret = secret
+    session.flush()
+
+    # Generate QR code as base64 PNG
+    import base64
+    import io
+    import qrcode
+
+    uri = build_totp_uri(secret, user.email)
+    img = qrcode.make(uri)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    qr_base64 = base64.b64encode(buf.getvalue()).decode("ascii")
+
+    return MFASetupResponse(qr_code_base64=qr_base64, totp_secret=secret)
+
+
+@app.post("/auth/mfa/verify-setup")
+def auth_mfa_verify_setup(
+    body: MFAVerifySetupRequest,
+    current: tuple[User, Session] = Depends(get_current_user)
+) -> dict:
+    """Verify the TOTP code and enable MFA if valid."""
+    user, session = current
+    if user.mfa_enabled:
+        raise HTTPException(status_code=400, detail={"category": "mfa_already_enabled"})
+    if not user.mfa_secret:
+        raise HTTPException(status_code=400, detail={"category": "mfa_not_configured"})
+
+    if not verify_totp_code(user.mfa_secret, body.code):
+        raise HTTPException(status_code=401, detail={"category": "invalid_mfa_code"})
+
+    user.mfa_enabled = True
+    session.flush()
+    return {"status": "mfa_enabled"}
+
+
+@app.post("/auth/mfa/disable")
+def auth_mfa_disable(
+    body: MFADisableRequest,
+    current: tuple[User, Session] = Depends(get_current_user)
+) -> dict:
+    """Disable MFA — requires a valid TOTP code to prove possession."""
+    user, session = current
+    if not user.mfa_enabled:
+        raise HTTPException(status_code=400, detail={"category": "mfa_not_enabled"})
+    if not user.mfa_secret:
+        raise HTTPException(status_code=400, detail={"category": "mfa_not_configured"})
+
+    if not verify_totp_code(user.mfa_secret, body.code):
+        raise HTTPException(status_code=401, detail={"category": "invalid_mfa_code"})
+
+    user.mfa_enabled = False
+    user.mfa_secret = None
+    session.flush()
+    return {"status": "mfa_disabled"}
+
+
+@app.post("/auth/mfa/challenge")
+def auth_mfa_challenge(body: MFAChallengeRequest, response: Response) -> dict:
+    """Exchange a valid mfa_pending token + TOTP code for a real access token.
+
+    NOT protected by get_current_user — the mfa_pending token itself
+    authenticates the request. Rate-limited to 5 attempts per token.
+    """
+    # Decode and validate mfa_pending token using shared helper
+    try:
+        user_id, jti = decode_mfa_pending_token(body.mfa_token)
+    except InvalidTokenError as exc:
+        raise HTTPException(status_code=401, detail={"category": "invalid_token"}) from exc
+
+    # Rate limit: max 5 attempts per mfa_pending token
+    try:
+        check_and_increment_challenge_attempt(user_id, jti)
+    except MFARateLimitedError as exc:
+        raise _auth_error_response(exc) from exc
+
+    # Fetch user (with RLS via app_user_session) to get mfa_secret
+    with app_user_session(user_id) as session:
+        user = session.get(User, user_id)
+        if user is None or not user.mfa_enabled or not user.mfa_secret:
+            raise HTTPException(status_code=401, detail={"category": "invalid_token"})
+
+        if not verify_totp_code(user.mfa_secret, body.code):
+            raise HTTPException(status_code=401, detail={"category": "invalid_mfa_code"})
+
+    # Success — clear attempts and issue real access token
+    clear_challenge_attempts(user_id, jti)
+    token = create_access_token(user_id)
+    _set_access_cookie(response, token)
+    return {"user_id": str(user_id)}
 
 
 @app.post("/auth/logout")

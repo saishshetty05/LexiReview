@@ -25,6 +25,9 @@ moto[s3]==5.*
 anthropic==0.*
 presidio-analyzer==2.2.*
 spacy==3.8.*
+# MFA (TOTP)
+pyotp==2.9.*
+qrcode[pil]==7.4.*
 # spaCy's small English model, pinned as a direct wheel URL (not a
 # `python -m spacy download` step) so plain `pip install -r requirements.txt`
 # is sufficient everywhere -- Docker, CI, and a bare venv alike. ci.yml runs

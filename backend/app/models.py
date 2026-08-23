@@ -34,6 +34,11 @@ class User(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     email: Mapped[str] = mapped_column(String, nullable=False, unique=True)
     password_hash: Mapped[str] = mapped_column(String, nullable=False)
+    # MFA (TOTP) — opt-in, never mandatory. mfa_secret is the base32-encoded
+    # TOTP secret (nullable: MFA not set up). mfa_enabled is the gate — only
+    # when TRUE does login require a TOTP challenge.
+    mfa_secret: Mapped[str | None] = mapped_column(String, nullable=True)
+    mfa_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
