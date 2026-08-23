@@ -1,7 +1,7 @@
 """users: add mfa_secret and mfa_enabled for TOTP-based MFA
 
-Revision ID: 008_users_mfa_columns
-Revises: 007_documents_unique_constraint
+Revision ID: 009_users_mfa_columns
+Revises: 008_decisions_severity_override
 Create Date: 2026-08-22
 
 MFA is opt-in (never mandatory). mfa_secret stores the TOTP secret

@@ -88,7 +88,9 @@ class LoginRequest(BaseModel):
 
 class MFASetupResponse(BaseModel):
     qr_code_base64: str
-    backup_code: str
+    # This is the raw TOTP secret (base32) for manual entry into authenticator apps.
+    # It is NOT a one-time recovery/backup code. Named 'totp_secret' to avoid confusion.
+    totp_secret: str
 
 
 class MFAVerifySetupRequest(BaseModel):
@@ -203,7 +205,7 @@ def auth_mfa_setup(current: tuple[User, Session] = Depends(get_current_user)) ->
     img.save(buf, format="PNG")
     qr_base64 = base64.b64encode(buf.getvalue()).decode("ascii")
 
-    return MFASetupResponse(qr_code_base64=qr_base64, backup_code=secret)
+    return MFASetupResponse(qr_code_base64=qr_base64, totp_secret=secret)
 
 
 @app.post("/auth/mfa/verify-setup")
@@ -254,21 +256,19 @@ def auth_mfa_challenge(body: MFAChallengeRequest, response: Response) -> dict:
     NOT protected by get_current_user — the mfa_pending token itself
     authenticates the request. Rate-limited to 5 attempts per token.
     """
-    # Decode and validate mfa_pending token
+    # Decode and validate mfa_pending token using shared helper
     try:
         payload = jwt.decode(
             body.mfa_token,
             os.environ["JWT_SECRET"],
             algorithms=["HS256"]
         )
-    except jwt.PyJWTError as exc:
+        if payload.get("mfa_pending") is not True:
+            raise InvalidTokenError("token is missing, expired, or invalid")
+        user_id = uuid.UUID(payload["sub"])
+        jti = payload["jti"]
+    except (jwt.PyJWTError, KeyError, ValueError, InvalidTokenError) as exc:
         raise HTTPException(status_code=401, detail={"category": "invalid_token"}) from exc
-
-    if payload.get("mfa_pending") is not True:
-        raise HTTPException(status_code=401, detail={"category": "invalid_token"})
-
-    user_id = uuid.UUID(payload["sub"])
-    jti = payload["jti"]
 
     # Rate limit: max 5 attempts per mfa_pending token
     try:

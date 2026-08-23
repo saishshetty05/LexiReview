@@ -88,7 +88,7 @@ def _enable_mfa_for_user(user_id: uuid.UUID, email: str, auth_cookies: dict) -> 
     setup_resp = client.post("/auth/mfa/setup", cookies=auth_cookies)
     assert setup_resp.status_code == 200, setup_resp.text
     setup_data = setup_resp.json()
-    secret = setup_data["backup_code"]
+    secret = setup_data["totp_secret"]
     qr_base64 = setup_data["qr_code_base64"]
 
     # Verify QR code decodes to valid otpauth URI
@@ -142,7 +142,7 @@ def test_mfa_verify_setup_accepts_valid_rejects_invalid(pg_owner_engine):
     # Setup MFA
     setup_resp = client.post("/auth/mfa/setup", cookies=auth_cookies)
     assert setup_resp.status_code == 200
-    secret = setup_resp.json()["backup_code"]
+    secret = setup_resp.json()["totp_secret"]
 
     # Valid code should work
     totp = pyotp.TOTP(secret)
@@ -167,7 +167,7 @@ def test_mfa_verify_setup_rejects_invalid_code(pg_owner_engine):
 
     setup_resp = client.post("/auth/mfa/setup", cookies=auth_cookies)
     assert setup_resp.status_code == 200
-    secret = setup_resp.json()["backup_code"]
+    secret = setup_resp.json()["totp_secret"]
 
     # Invalid code (wrong by 1 digit)
     totp = pyotp.TOTP(secret)

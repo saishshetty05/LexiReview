@@ -407,7 +407,6 @@ just keeping FR-15's cascade complete.
 Frontend wiring (`useDecisions` off localStorage onto this API) is a
 separate follow-up PR, after this one merges.
 
-<<<<<<< Updated upstream
 ### 7a. Severity personalization (v1.8)
 
 Internship-guide task, not a PRD FR. A reviewer can downgrade/upgrade a
@@ -472,10 +471,10 @@ change, and the worker/pipeline/LLM-client wiring are Person B's lane
 (same boundary as §7 itself) — no ingestion-side table touched. Frontend
 UI for setting an override (likely on `FindingCard`, alongside the
 existing accept/dismiss controls) is a separate follow-up PR.
-=======
-## 8. MFA (TOTP) authentication (v1.8)
 
-Opt-in, never mandatory. Adds two columns to `users` (migration 008):
+## 8. MFA (TOTP) authentication (v1.9)
+
+Opt-in, never mandatory. Adds two columns to `users` (migration 009):
 - `mfa_secret` — VARCHAR, nullable, base32-encoded TOTP secret
 - `mfa_enabled` — BOOLEAN NOT NULL DEFAULT FALSE
 
@@ -510,11 +509,10 @@ Compatible with Google Authenticator, Authy, 1Password, etc.
 
 ### Security notes
 
-- The TOTP secret is stored encrypted at rest only in the sense that `app_user` has no SELECT grant on other users' rows (RLS). There is no application-level encryption of the secret column; it is base32 plaintext in the DB.
+- The TOTP secret is stored in plaintext (base32) in the DB; protection relies solely on RLS (no column-level encryption). This is an explicit design choice for opt-in MFA.
 - `mfa_pending` tokens are short-lived (5 min) and single-use for the challenge flow.
 - On successful challenge, the attempt counter is cleared and a real 15-minute access token is issued.
 - On rate limit, the `mfa_pending` token is invalidated — even a valid TOTP code will not work until the user logs in again.
->>>>>>> Stashed changes
 
 ## Change log
 
