@@ -121,6 +121,33 @@ describe("AccountSettingsPage MFA card", () => {
     expect(screen.getByText(/Secret \(manual entry\)/).closest("div")).toHaveTextContent("SECRETXYZ");
   });
 
+  it("does not clobber an in-progress setup flow if the status query resolves after the click", async () => {
+    // Regression test for a real race, not a contrived one: the mfaStatus
+    // GET fires on mount and is still in flight (neither mock is manually
+    // sequenced -- both just resolve on their own timing) when the user
+    // clicks Enable. If that status fetch's resolution lands after the
+    // setup mutation's, its effect must not clobber mfaState back to
+    // "disabled" mid-setup (PROJECT_STATUS.md §5 / DECISION_LOG.md,
+    // 2026-08-23) -- confirmed via direct tracing that this ordering (click
+    // resolves before the still-pending initial status fetch) is exactly
+    // what happens without waiting for renderDisabled()'s settle step first.
+    mfaStatusMock.mockResolvedValue({ mfa_enabled: false, mfa_configured: false });
+    mfaSetupMock.mockResolvedValue({ qr_code_base64: "qrbase64data", totp_secret: "SECRETXYZ" });
+    renderSettingsPage();
+    await screen.findByText("Two-factor authentication is not enabled.");
+
+    fireEvent.click(screen.getByRole("button", { name: "Enable two-factor authentication" }));
+    await waitFor(() => expect(mfaSetupMock).toHaveBeenCalled());
+    // Let both the setup mutation's and the status query's own resolutions
+    // (and the effects they trigger) fully settle before asserting.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+
+    expect(screen.getByAltText("MFA QR code")).toBeInTheDocument();
+    expect(screen.queryByText("Two-factor authentication is not enabled.")).not.toBeInTheDocument();
+  });
+
   it("Cancel during the QR step returns to the disabled state", async () => {
     mfaSetupMock.mockResolvedValue({ qr_code_base64: "qrbase64data", totp_secret: "SECRETXYZ" });
     await renderDisabled();
