@@ -11,8 +11,6 @@ import tempfile
 import uuid
 from typing import Iterator, Literal
 
-import jwt
-
 from celery import Celery
 from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
 from pydantic import BaseModel
@@ -30,6 +28,7 @@ from app.auth import (
     create_access_token,
     create_mfa_pending_token,
     decode_access_token,
+    decode_mfa_pending_token,
     delete_account_cascade,
     generate_mfa_secret,
     register,
@@ -258,16 +257,8 @@ def auth_mfa_challenge(body: MFAChallengeRequest, response: Response) -> dict:
     """
     # Decode and validate mfa_pending token using shared helper
     try:
-        payload = jwt.decode(
-            body.mfa_token,
-            os.environ["JWT_SECRET"],
-            algorithms=["HS256"]
-        )
-        if payload.get("mfa_pending") is not True:
-            raise InvalidTokenError("token is missing, expired, or invalid")
-        user_id = uuid.UUID(payload["sub"])
-        jti = payload["jti"]
-    except (jwt.PyJWTError, KeyError, ValueError, InvalidTokenError) as exc:
+        user_id, jti = decode_mfa_pending_token(body.mfa_token)
+    except InvalidTokenError as exc:
         raise HTTPException(status_code=401, detail={"category": "invalid_token"}) from exc
 
     # Rate limit: max 5 attempts per mfa_pending token

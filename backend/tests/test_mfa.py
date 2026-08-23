@@ -209,7 +209,7 @@ def test_login_mfa_enabled_returns_mfa_pending_token(pg_owner_engine):
 
     # The mfa_token should be decodable
     mfa_token = login_resp.json()["mfa_token"]
-    decoded_user_id = decode_mfa_pending_token(mfa_token)
+    decoded_user_id, _jti = decode_mfa_pending_token(mfa_token)
     assert decoded_user_id == user_id
 
 

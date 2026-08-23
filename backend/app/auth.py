@@ -186,17 +186,17 @@ def create_mfa_pending_token(user_id: uuid.UUID) -> str:
     return jwt.encode(payload, os.environ["JWT_SECRET"], algorithm=JWT_ALGORITHM)
 
 
-def decode_mfa_pending_token(token: str) -> uuid.UUID:
+def decode_mfa_pending_token(token: str) -> tuple[uuid.UUID, str]:
     """Validate and decode an mfa_pending token.
 
     Raises InvalidTokenError if missing, expired, tampered, or missing
-    the mfa_pending=true claim. Returns the user_id on success.
+    the mfa_pending=true claim. Returns (user_id, jti) on success.
     """
     try:
         payload = jwt.decode(token, os.environ["JWT_SECRET"], algorithms=[JWT_ALGORITHM])
         if payload.get("mfa_pending") is not True:
             raise InvalidTokenError("token is missing, expired, or invalid")
-        return uuid.UUID(payload["sub"])
+        return uuid.UUID(payload["sub"]), payload["jti"]
     except (jwt.PyJWTError, KeyError, ValueError) as exc:
         raise InvalidTokenError("token is missing, expired, or invalid") from exc
 
