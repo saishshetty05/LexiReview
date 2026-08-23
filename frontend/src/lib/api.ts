@@ -50,6 +50,11 @@ const CATEGORY_MESSAGES: Record<string, string> = {
   invalid_password: "Password must be 8-72 characters.",
   missing_token: "You're not logged in.",
   invalid_token: "Your session has expired. Please log in again.",
+  mfa_already_enabled: "Two-factor authentication is already enabled.",
+  mfa_not_enabled: "Two-factor authentication is not enabled.",
+  mfa_not_configured: "Two-factor authentication is not configured.",
+  invalid_mfa_code: "Invalid authentication code. Please try again.",
+  mfa_rate_limited: "Too many failed attempts. Please wait a few minutes and try again.",
 };
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
@@ -81,6 +86,11 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 
 export interface LoginResult {
   user_id: string;
+  // Present when MFA is enabled for the user. The mfa_pending_token is a
+  // short-lived JWT (5 min) that must be exchanged via /auth/mfa/challenge
+  // with a valid TOTP code to get the real access token cookie.
+  mfa_required?: boolean;
+  mfa_token?: string;
 }
 
 export function login(email: string, password: string): Promise<LoginResult> {
@@ -88,6 +98,61 @@ export function login(email: string, password: string): Promise<LoginResult> {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ email, password }),
+  });
+}
+
+export interface MFASetupResult {
+  qr_code_base64: string; // base64 PNG
+  totp_secret: string; // raw TOTP secret (base32) for manual entry
+}
+
+export function mfaSetup(): Promise<MFASetupResult> {
+  return request<MFASetupResult>("/auth/mfa/setup", { method: "POST" });
+}
+
+export interface MFAVerifySetupRequest {
+  code: string; // 6-digit TOTP
+}
+
+export function mfaVerifySetup(body: MFAVerifySetupRequest): Promise<{ status: string }> {
+  return request("/auth/mfa/verify-setup", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export interface MFAStatusResult {
+  mfa_enabled: boolean;
+  mfa_configured: boolean;
+}
+
+export function mfaStatus(): Promise<MFAStatusResult> {
+  return request<MFAStatusResult>("/auth/mfa/status");
+}
+
+export interface MFADisableRequest {
+  code: string; // 6-digit TOTP
+}
+
+export function mfaDisable(body: MFADisableRequest): Promise<{ status: string }> {
+  return request("/auth/mfa/disable", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+export interface MFAChallengeRequest {
+  mfa_token: string;
+  code: string; // 6-digit TOTP
+}
+
+export function mfaChallenge(body: MFAChallengeRequest): Promise<LoginResult> {
+  return request<LoginResult>("/auth/mfa/challenge", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
   });
 }
 
