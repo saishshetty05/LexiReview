@@ -14,8 +14,10 @@ from __future__ import annotations
 import base64
 import io
 import uuid
+from unittest.mock import MagicMock, patch
 
 import pyotp
+import redis.exceptions
 from fastapi.testclient import TestClient
 
 from app.auth import (
@@ -28,6 +30,42 @@ from app.auth import (
 from app.main import ACCESS_TOKEN_COOKIE, app
 
 client = TestClient(app)
+
+
+class _MockRedis:
+    """In-memory Redis mock for rate-limit tests."""
+
+    def __init__(self):
+        self._store: dict[str, int] = {}
+
+    def incr(self, key: str) -> int:
+        self._store[key] = self._store.get(key, 0) + 1
+        return self._store[key]
+
+    def expire(self, key: str, ttl: int) -> bool:
+        return True
+
+    def get(self, key: str) -> int | None:
+        return self._store.get(key)
+
+    def delete(self, key: str) -> int:
+        if key in self._store:
+            del self._store[key]
+            return 1
+        return 0
+
+
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _mock_mfa_redis(monkeypatch):
+    """Patch mfa_redis module to use in-memory mock for all tests."""
+    mock = _MockRedis()
+    import app.mfa_redis as mfa_redis_module
+
+    monkeypatch.setattr(mfa_redis_module, "_client", lambda: mock)
+    yield mock
 
 
 def _unique_email() -> str:
