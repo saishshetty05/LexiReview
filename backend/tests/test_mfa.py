@@ -4,9 +4,9 @@ Covers:
 - /auth/mfa/setup generates valid otpauth:// URI with correct issuer/account
 - /auth/mfa/verify-setup accepts valid code, rejects invalid
 - POST /auth/login with MFA-enabled user returns mfa_pending token (no access token cookie)
-- /auth/mfa/challenge with correct TOTP returns real access token
-- /auth/mfa/challenge with wrong code returns 401
-- /auth/mfa/challenge fails after 5 wrong attempts (rate limit)
+- POST /auth/mfa/challenge with correct TOTP returns real access token
+- POST /auth/mfa/challenge with wrong code returns 401
+- POST /auth/mfa/challenge fails after 5 wrong attempts (rate limit)
 - /auth/mfa/disable requires valid TOTP
 """
 from __future__ import annotations
@@ -14,10 +14,10 @@ from __future__ import annotations
 import base64
 import io
 import uuid
-from unittest.mock import MagicMock, patch
+
+import pytest
 
 import pyotp
-import redis.exceptions
 from fastapi.testclient import TestClient
 
 from app.auth import (
@@ -53,9 +53,6 @@ class _MockRedis:
             del self._store[key]
             return 1
         return 0
-
-
-import pytest
 
 
 @pytest.fixture(autouse=True)
@@ -116,6 +113,7 @@ def _enable_mfa_for_user(user_id: uuid.UUID, email: str, auth_cookies: dict) -> 
 
 
 # ── Tests ────────────────────────────────────────────────────────────────────
+
 
 def test_mfa_setup_generates_valid_otpauth_uri(pg_owner_engine):
     """Setup returns QR code that encodes otpauth:// with issuer=LexiReview and account=email."""
