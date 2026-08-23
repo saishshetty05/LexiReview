@@ -16,6 +16,10 @@ import {
   getJobFindings,
   login,
   logout,
+  mfaChallenge,
+  mfaDisable,
+  mfaSetup,
+  mfaVerifySetup,
   putFindingDecision,
   register,
   uploadDocument,
@@ -147,4 +151,22 @@ export function useDocumentsQuery() {
     queryKey: ["documents"],
     queryFn: () => getDocuments(),
   });
+}
+
+// ── MFA mutations ────────────────────────────────────────────────────────────
+
+export function useMFASetupMutation() {
+  return useMutation({ mutationFn: mfaSetup });
+}
+
+export function useMFAVerifySetupMutation() {
+  return useMutation({ mutationFn: mfaVerifySetup });
+}
+
+export function useMFADisableMutation() {
+  return useMutation({ mutationFn: mfaDisable });
+}
+
+export function useMFAChallengeMutation() {
+  return useMutation({ mutationFn: mfaChallenge });
 }
