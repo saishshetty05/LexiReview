@@ -13,6 +13,13 @@ catches at the FUZZY_MATCH_THRESHOLD (0.90).
 This is the "adversarial fixture" that CLAUDE.md rule 6 requires:
 a real document that causes the LLM to produce a quote the verifier
 genuinely can't match, proving the full pipeline works end-to-end.
+
+The multi-finding and misbehaving-missing_clause scenarios already have
+dedicated coverage in test_analysis_pipeline.py
+(test_multiple_findings_are_each_finalized_independently,
+test_missing_clause_evidence_quote_and_block_ids_forced_empty_regardless_of_llm_output)
+-- not duplicated here, since neither actually exercises this file's
+adversarial document or quote.
 """
 
 from __future__ import annotations
@@ -22,79 +29,8 @@ import io
 import pytest
 
 from app.analysis_pipeline import run_analysis
-from app.verifier import FUZZY_MATCH_THRESHOLD
-
-
-class _AdversarialLLMClient:
-    """Simulates an LLM that hallucinates a quote that looks plausible
-    but doesn't actually exist in the document. The quote uses real
-    vocabulary and legal phrasing from the document but combines them
-    in ways that never appear verbatim."""
-
-    def __init__(self) -> None:
-        self.received_blocks = None
-        self.received_kwargs = None
-
-    def analyze(self, blocks, *, pseudonymised, is_synthetic, severity_examples=None):
-        self.received_blocks = blocks
-        self.received_kwargs = {
-            "pseudonymised": pseudonymised,
-            "is_synthetic": is_synthetic,
-            "severity_examples": severity_examples,
-        }
-
-        # This quote LOOKS like it could be real - it uses real terms
-        # from the document (monthly rent, effective date, second year,
-        # notwithstanding) but the specific combination with the
-        # exact numbers and phrasing never appears in the source.
-        #
-        # Source text: "Clause 3: The monthly rent shall be Rs. 50,000..."
-        # Source text: "Clause 14: Notwithstanding the above, the parties agree
-        # to a monthly rent of Rs. 60,000 effective from the second year."
-        #
-        # Hallucinated quote combines them with significant fabrication:
-        # - "Rs. 55,000 per month" (never appears, source has 50,000 and 60,000)
-        # - "payable on the 5th of each calendar month" (source: "5th of each month")
-        # - "notwithstanding the provisions of clause 3" (source: "notwithstanding the above")
-        # - "tenancy period" (source: "lease term")
-        #
-        # SequenceMatcher ratio should be well below 0.90 threshold.
-        return [
-            {
-                "category": "inconsistency",
-                "severity": "high",
-                "block_ids": ["BLOCK_3", "BLOCK_5"],
-                "evidence_quote": (
-                    "The monthly rent shall be Rs. 55,000 per month, payable on the 5th "
-                    "of each calendar month, notwithstanding the provisions of clause 3, "
-                    "effective from the second year of the tenancy period."
-                ),
-                "explanation": (
-                    "The LLM hallucinates a blended clause that combines "
-                    "Clause 3's rent amount with Clause 14's escalation, "
-                    "but the specific Rs. 55,000 figure, 'per month', 'calendar month', "
-                    "'notwithstanding the provisions of clause 3', and 'tenancy period' "
-                    "phrasing never appear in the document."
-                ),
-            }
-        ]
-
-    def summarize(self, blocks, *, pseudonymised, is_synthetic):
-        self.received_blocks = blocks
-        self.received_kwargs = {"pseudonymised": pseudonymised, "is_synthetic": is_synthetic}
-        return {"overview": "A lease agreement with rent terms.", "key_terms": []}
-
-
-def _make_docx_bytes(paragraphs: list[str]) -> bytes:
-    from docx import Document
-
-    doc = Document()
-    for p in paragraphs:
-        doc.add_paragraph(p)
-    buf = io.BytesIO()
-    doc.save(buf)
-    return buf.getvalue()
-
+from app.verifier import FUZZY_MATCH_THRESHOLD, verify_quote
+from tests.test_analysis_pipeline import _FakeLLMClient, _make_docx_bytes
 
 # Realistic lease document with two rent-related clauses that an LLM
 # might conflate. This is a SYNTHETIC document per CLAUDE.md.
@@ -119,6 +55,33 @@ ADVERSARIAL_DOC = [
     "Contact the landlord at owner@example.com for queries.",
 ]
 
+# This quote LOOKS like it could be real -- it uses real terms from the
+# document (monthly rent, effective date, second year, notwithstanding)
+# but combines them in a way that never appears verbatim:
+#   - "Rs. 55,000 per month" (never appears, source has 50,000 and 60,000)
+#   - "payable on the 5th of each calendar month" (source: "5th of each month")
+#   - "notwithstanding the provisions of clause 3" (source: "notwithstanding the above")
+#   - "tenancy period" (source: "lease term")
+HALLUCINATED_QUOTE = (
+    "The monthly rent shall be Rs. 55,000 per month, payable on the 5th "
+    "of each calendar month, notwithstanding the provisions of clause 3, "
+    "effective from the second year of the tenancy period."
+)
+
+ADVERSARIAL_FINDING = {
+    "category": "inconsistency",
+    "severity": "high",
+    "block_ids": ["BLOCK_3", "BLOCK_5"],
+    "evidence_quote": HALLUCINATED_QUOTE,
+    "explanation": (
+        "The LLM hallucinates a blended clause that combines "
+        "Clause 3's rent amount with Clause 14's escalation, "
+        "but the specific Rs. 55,000 figure, 'per month', 'calendar month', "
+        "'notwithstanding the provisions of clause 3', and 'tenancy period' "
+        "phrasing never appear in the document."
+    ),
+}
+
 
 def test_adversarial_llm_quote_fails_both_exact_and_fuzzy_verification():
     """The core adversarial test: LLM produces a quote that looks plausible
@@ -128,7 +91,7 @@ def test_adversarial_llm_quote_fails_both_exact_and_fuzzy_verification():
     This proves the full pipeline works end-to-end for the adversarial case.
     """
     file_bytes = _make_docx_bytes(ADVERSARIAL_DOC)
-    fake_llm = _AdversarialLLMClient()
+    fake_llm = _FakeLLMClient([ADVERSARIAL_FINDING])
 
     results = run_analysis(file_bytes, "docx", fake_llm, is_synthetic=True)
 
@@ -158,11 +121,16 @@ def test_adversarial_llm_quote_fails_both_exact_and_fuzzy_verification():
 
 
 def test_adversarial_quote_similarity_below_threshold():
-    """Verify that the hallucinated quote's similarity to the source
-    is genuinely below the FUZZY_MATCH_THRESHOLD. This is a sanity
-    check that our adversarial fixture is actually adversarial."""
-    from difflib import SequenceMatcher
-
+    """Verify that the hallucinated quote's similarity to the source is
+    genuinely below FUZZY_MATCH_THRESHOLD. This is a sanity check that our
+    adversarial fixture is actually adversarial -- so it has to score the
+    quote the same way verify_quote (app/verifier.py) actually does, not an
+    approximation. SequenceMatcher.ratio() (2*matches/(len(a)+len(b))) is a
+    different, unrelated number from verify_quote's own coverage metric
+    (matched_chars/len(span)) -- the two can diverge widely and this check
+    must not silently stop meaning anything if FUZZY_MATCH_THRESHOLD or the
+    scoring formula is ever retuned.
+    """
     # Reconstruct the source text that would be searched
     # (blocks BLOCK_3 and BLOCK_5 from the document after pseudonymisation)
     source_text = (
@@ -173,23 +141,18 @@ def test_adversarial_quote_similarity_below_threshold():
         "year of the lease term."
     )
 
-    hallucinated_quote = (
-        "The monthly rent shall be Rs. 55,000 per month, payable on the 5th "
-        "of each calendar month, notwithstanding the provisions of clause 3, "
-        "effective from the second year of the tenancy period."
-    )
-
-    ratio = SequenceMatcher(None, source_text, hallucinated_quote).ratio()
+    result = verify_quote(source_text, HALLUCINATED_QUOTE)
 
     # Must be below threshold to trigger unverified
-    assert ratio < FUZZY_MATCH_THRESHOLD, (
-        f"Adversarial quote similarity ({ratio:.3f}) is above threshold "
-        f"({FUZZY_MATCH_THRESHOLD}). The fixture is not adversarial enough "
-        f"or the threshold has changed."
+    assert result.match_score < FUZZY_MATCH_THRESHOLD, (
+        f"Adversarial quote match_score ({result.match_score:.3f}) is above "
+        f"threshold ({FUZZY_MATCH_THRESHOLD}). The fixture is not adversarial "
+        f"enough or the threshold has changed."
     )
+    assert result.verification == "unverified"
 
     # Should also not be an exact substring
-    assert hallucinated_quote not in source_text
+    assert HALLUCINATED_QUOTE not in source_text
 
 
 def test_adversarial_quote_not_an_exact_substring():
@@ -202,119 +165,7 @@ def test_adversarial_quote_not_an_exact_substring():
     doc = Document(io.BytesIO(file_bytes))
     full_text = "\n".join(p.text for p in doc.paragraphs)
 
-    hallucinated_quote = (
-        "The monthly rent shall be Rs. 55,000 per month, payable on the 5th "
-        "of each calendar month, notwithstanding the provisions of clause 3, "
-        "effective from the second year of the tenancy period."
-    )
-
-    assert hallucinated_quote not in full_text
-
-
-def test_multiple_adversarial_findings_each_handled_independently():
-    """When the LLM returns multiple findings, some verified and some
-    unverified, each is handled independently."""
-    from app.analysis_pipeline import run_analysis
-
-    class _MixedLLMClient:
-        def __init__(self):
-            self.received_blocks = None
-            self.received_kwargs = None
-
-        def analyze(self, blocks, *, pseudonymised, is_synthetic, severity_examples=None):
-            self.received_blocks = blocks
-            self.received_kwargs = {
-                "pseudonymised": pseudonymised,
-                "is_synthetic": is_synthetic,
-                "severity_examples": severity_examples,
-            }
-            # One real inconsistency (verified) + one hallucinated (unverified)
-            return [
-                {
-                    "category": "inconsistency",
-                    "severity": "high",
-                    "block_ids": ["BLOCK_2", "BLOCK_3"],
-                    "evidence_quote": (
-                        "The monthly rent shall be Rs. 50,000 [...] "
-                        "a monthly rent of Rs. 60,000 effective from the second year."
-                    ),
-                    "explanation": "Clause 3 and Clause 14 disagree on the monthly rent.",
-                },
-                {
-                    "category": "liability",
-                    "severity": "high",
-                    "block_ids": ["BLOCK_1"],
-                    "evidence_quote": (
-                        "Tenant shall indemnify Landlord for all claims "
-                        "arising from structural defects in the premises."
-                    ),
-                    "explanation": "Hallucinated indemnity clause that doesn't exist.",
-                },
-            ]
-
-        def summarize(self, blocks, *, pseudonymised, is_synthetic):
-            self.received_blocks = blocks
-            self.received_kwargs = {"pseudonymised": pseudonymised, "is_synthetic": is_synthetic}
-            return {"overview": "A lease agreement.", "key_terms": []}
-
-    file_bytes = _make_docx_bytes(ADVERSARIAL_DOC)
-    fake_llm = _MixedLLMClient()
-
-    results = run_analysis(file_bytes, "docx", fake_llm, is_synthetic=True)
-
-    assert len(results) == 2
-
-    # First finding (real quote) should be verified
-    verified_finding = next(r for r in results if r["category"] == "inconsistency")
-    assert verified_finding["verification"] == "verified"
-    assert verified_finding["confidence"] == "standard"
-
-    # Second finding (hallucinated) should be unverified
-    unverified_finding = next(r for r in results if r["category"] == "liability")
-    assert unverified_finding["verification"] == "unverified"
-    assert unverified_finding["confidence"] == "needs_review"
-
-
-def test_missing_clause_always_verified_even_with_adversarial_llm():
-    """Missing clause findings must always be verified (empty quote,
-    empty block_ids) regardless of what the LLM returns. This is
-    a defense-in-depth check from CONTRACTS.md §2."""
-    from app.analysis_pipeline import run_analysis
-
-    class _MisbehavingMissingClauseLLM:
-        def __init__(self):
-            self.received_blocks = None
-
-        def analyze(self, blocks, *, pseudonymised, is_synthetic, severity_examples=None):
-            self.received_blocks = blocks
-            # LLM returns non-empty quote and block_ids for missing_clause
-            return [
-                {
-                    "category": "missing_clause",
-                    "severity": "medium",
-                    "block_ids": ["BLOCK_1", "BLOCK_2"],  # WRONG - should be empty
-                    "evidence_quote": "This Lease Agreement is entered into...",  # WRONG - should be empty
-                    "explanation": "No arbitration clause was found.",
-                }
-            ]
-
-        def summarize(self, blocks, *, pseudonymised, is_synthetic):
-            self.received_blocks = blocks
-            return {"overview": "A lease agreement.", "key_terms": []}
-
-    file_bytes = _make_docx_bytes(ADVERSARIAL_DOC)
-    fake_llm = _MisbehavingMissingClauseLLM()
-
-    results = run_analysis(file_bytes, "docx", fake_llm, is_synthetic=True)
-
-    assert len(results) == 1
-    finding = results[0]
-
-    # _finalize_finding should normalize missing_clause findings
-    assert finding["evidence_quote"] == ""
-    assert finding["block_ids"] == []
-    assert finding["verification"] == "verified"
-    assert finding["confidence"] == "standard"
+    assert HALLUCINATED_QUOTE not in full_text
 
 
 if __name__ == "__main__":
