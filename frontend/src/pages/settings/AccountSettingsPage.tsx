@@ -36,11 +36,17 @@ export function AccountSettingsPage() {
   const [totpSecret, setTotpSecret] = useState<string | null>(null);
   const [mfaCode, setMfaCode] = useState("");
 
-  // Initialize mfaState from actual MFA status
+  // Initialize mfaState from actual MFA status. Uses the functional updater
+  // (rather than reading mfaState directly, which would need to be a
+  // dependency and would re-run this on every local state change) so a
+  // late-resolving status fetch can check the CURRENT state before
+  // overwriting it -- if the user already clicked into the setup flow while
+  // this request was still in flight, applying the (now stale) server
+  // status here would silently kick them back out of it mid-setup.
   useEffect(() => {
-    if (mfaStatusQuery.data) {
-      setMfaState(mfaStatusQuery.data.mfa_enabled ? "enabled" : "disabled");
-    }
+    if (!mfaStatusQuery.data) return;
+    const serverEnabled = mfaStatusQuery.data.mfa_enabled;
+    setMfaState((prev) => (prev === "setup_qr" || prev === "setup_verify" ? prev : serverEnabled ? "enabled" : "disabled"));
   }, [mfaStatusQuery.data]);
 
   async function handleLogout() {
