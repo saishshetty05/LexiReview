@@ -148,6 +148,115 @@ describe("AccountSettingsPage MFA card", () => {
     expect(screen.queryByText("Two-factor authentication is not enabled.")).not.toBeInTheDocument();
   });
 
+  it("does not clobber the enabled state when the mount-time status fetch resolves with stale data after verify-setup succeeds", async () => {
+    // Regression test for the gap left after the first fix (PROJECT_STATUS.md
+    // §5 / DECISION_LOG.md, 2026-08-23): the sync effect's guard only bailed
+    // out for prev === "setup_qr"/"setup_verify", not "enabled" -- so if the
+    // mount-time GET /auth/mfa/status is still in flight (carrying
+    // pre-verification mfa_enabled: false) when verify-setup succeeds and
+    // sets mfaState("enabled"), its late resolution fell through the guard
+    // and clobbered the UI straight back to "disabled" right after the user
+    // turned MFA on. Fixed by cancelling + invalidating the mfa-status query
+    // in the verify-setup mutation's onSuccess so that superseded fetch's
+    // result is discarded rather than applied.
+    let resolveMountStatus: (value: { mfa_enabled: boolean; mfa_configured: boolean }) => void = () => {};
+    mfaStatusMock.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveMountStatus = resolve; }),
+    );
+    // The real mfa-status value once verify-setup actually lands, used by
+    // the refetch the verify-setup mutation's own invalidateQueries
+    // triggers -- distinct from the mockImplementationOnce above so that
+    // call resolves the mount fetch specifically, not whichever call
+    // happens to run last.
+    mfaStatusMock.mockResolvedValue({ mfa_enabled: true, mfa_configured: true });
+    mfaSetupMock.mockResolvedValue({ qr_code_base64: "qrbase64data", totp_secret: "SECRETXYZ" });
+    mfaVerifySetupMock.mockResolvedValue({ status: "mfa_enabled" });
+    renderSettingsPage();
+    await waitFor(() => expect(mfaStatusMock).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "Enable two-factor authentication" }));
+    await screen.findByAltText("MFA QR code");
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    fireEvent.change(await screen.findByLabelText("Authentication code"), { target: { value: "123456" } });
+    fireEvent.click(screen.getByRole("button", { name: "Verify and enable" }));
+    await waitFor(() => expect(toastSuccessMock).toHaveBeenCalledWith("Two-factor authentication enabled"));
+    expect(screen.getByText("Two-factor authentication is enabled")).toBeInTheDocument();
+    // The verify-setup mutation's own invalidateQueries fires a fresh,
+    // correct refetch (landing true) -- this is call #2.
+    await waitFor(() => expect(mfaStatusMock).toHaveBeenCalledTimes(2));
+    expect(screen.getByText("Two-factor authentication is enabled")).toBeInTheDocument();
+
+    // The mount-time fetch -- which should have been cancelled by then --
+    // finally resolves with the stale pre-verification data. Its result
+    // must be discarded, not applied on top of the already-correct
+    // "enabled" state.
+    await act(async () => {
+      resolveMountStatus({ mfa_enabled: false, mfa_configured: false });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(screen.getByText("Two-factor authentication is enabled")).toBeInTheDocument();
+    expect(screen.queryByText("Two-factor authentication is not enabled.")).not.toBeInTheDocument();
+  });
+
+  it("does not clobber the disabled state when a fetch left in flight by verify-setup's own refetch resolves late after disable-mfa succeeds", async () => {
+    // Reverse direction, chained one hop further: verify-setup's own
+    // cancel+invalidate (tested above) fires a refetch that itself stays
+    // in flight -- slow network, same as the original mount-time case --
+    // right up until the user submits disable. The disable mutation's
+    // cancelQueries must discard THAT fetch's stale "still enabled" result
+    // too, not just the original mount-time one.
+    let resolveMountStatus: (value: { mfa_enabled: boolean; mfa_configured: boolean }) => void = () => {};
+    mfaStatusMock.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveMountStatus = resolve; }),
+    );
+    let resolvePostVerifyStatus: (value: { mfa_enabled: boolean; mfa_configured: boolean }) => void = () => {};
+    mfaStatusMock.mockImplementationOnce(
+      () => new Promise((resolve) => { resolvePostVerifyStatus = resolve; }),
+    );
+    // The real mfa-status value once disable actually lands, used by the
+    // refetch the disable mutation's own invalidateQueries triggers.
+    mfaStatusMock.mockResolvedValue({ mfa_enabled: false, mfa_configured: false });
+    mfaSetupMock.mockResolvedValue({ qr_code_base64: "qrbase64data", totp_secret: "SECRETXYZ" });
+    mfaVerifySetupMock.mockResolvedValue({ status: "mfa_enabled" });
+    mfaDisableMock.mockResolvedValue({ status: "mfa_disabled" });
+    renderSettingsPage();
+    await waitFor(() => expect(mfaStatusMock).toHaveBeenCalledTimes(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "Enable two-factor authentication" }));
+    await screen.findByAltText("MFA QR code");
+    fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    fireEvent.change(await screen.findByLabelText("Authentication code"), { target: { value: "123456" } });
+    fireEvent.click(screen.getByRole("button", { name: "Verify and enable" }));
+    await waitFor(() => expect(toastSuccessMock).toHaveBeenCalledWith("Two-factor authentication enabled"));
+    // verify-setup's own invalidateQueries fires the second (still-pending) fetch.
+    await waitFor(() => expect(mfaStatusMock).toHaveBeenCalledTimes(2));
+    expect(screen.getByText("Two-factor authentication is enabled")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Authentication code"), { target: { value: "654321" } });
+    fireEvent.click(screen.getByRole("button", { name: "Disable two-factor authentication" }));
+    await waitFor(() => expect(toastSuccessMock).toHaveBeenCalledWith("Two-factor authentication disabled"));
+    expect(screen.getByText("Two-factor authentication is not enabled.")).toBeInTheDocument();
+    // disable's own invalidateQueries fires a fresh, correct refetch (landing false).
+    await waitFor(() => expect(mfaStatusMock).toHaveBeenCalledTimes(3));
+    expect(screen.getByText("Two-factor authentication is not enabled.")).toBeInTheDocument();
+
+    // The fetch verify-setup's invalidateQueries triggered -- which should
+    // have been cancelled by the disable mutation by now -- finally
+    // resolves with stale "still enabled" data. Its result must be
+    // discarded, not applied on top of the already-correct "disabled" state.
+    await act(async () => {
+      resolvePostVerifyStatus({ mfa_enabled: true, mfa_configured: true });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    expect(screen.getByText("Two-factor authentication is not enabled.")).toBeInTheDocument();
+    expect(screen.queryByText("Two-factor authentication is enabled")).not.toBeInTheDocument();
+
+    // The original mount-time fetch, superseded twice over by now, is inert too.
+    resolveMountStatus({ mfa_enabled: false, mfa_configured: false });
+  });
+
   it("Cancel during the QR step returns to the disabled state", async () => {
     mfaSetupMock.mockResolvedValue({ qr_code_base64: "qrbase64data", totp_secret: "SECRETXYZ" });
     await renderDisabled();
