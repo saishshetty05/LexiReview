@@ -520,6 +520,111 @@ Compatible with Google Authenticator, Authy, 1Password, etc.
 - On successful challenge, the attempt counter is cleared and a real 15-minute access token is issued.
 - On rate limit, the `mfa_pending` token is invalidated — even a valid TOTP code will not work until the user logs in again.
 
+## 9. Refresh tokens (v1.11)
+
+Closes the PROJECT_STATUS.md §5 open item (noted as a TODO in `app/auth.py`
+since #25): access tokens are a 15-minute JWT with no renewal path, so a
+15-minute session is the actual UX today. This section adds a rotating
+refresh token so a user stays logged in across access-token expiry without
+re-entering credentials, while keeping the deterministic-revocation
+guarantees the rest of this codebase already holds itself to (verification,
+`risk_snapshot`, the rule-7 override — one layer that could silently keep a
+stale session alive is one too many here as well).
+
+DECIDED — new `refresh_tokens` table (migration 010): `id` uuid PK ·
+`user_id` uuid FK → `users.id` · `token_hash` text UNIQUE (SHA-256 hex of the
+raw token) · `created_at` timestamptz · `expires_at` timestamptz ·
+`revoked_at` timestamptz NULL. The raw token itself is never stored — only
+its hash — same reasoning as password hashing, and unlike `mfa_secret`
+(which must stay reversible to compute a TOTP comparison, §8's accepted
+plaintext tradeoff), a refresh token only ever needs an equality check.
+FORCE ROW LEVEL SECURITY, `app_user` granted `SELECT, INSERT, UPDATE` (no
+`DELETE`), same immutable-except-for-revocation pattern as `analysis_jobs`.
+
+DECIDED — a second RLS policy, `refresh_token_lookup`, mirrors migration
+003's `email_lookup` precedent exactly: SELECT-only, matched by
+`token_hash`, with no dependency on `app.user_id` — needed because
+`/auth/refresh` (below) must find the row *before* it knows which user it
+belongs to, the same bootstrapping problem `authenticate()`'s email lookup
+already solves for login. This is safe for the same reason that precedent
+is safe: a row is only findable by presenting the exact SHA-256 preimage of
+its `token_hash`, which requires already possessing the raw bearer token —
+the policy does not make token values guessable or enumerable, it only
+skips a check that is impossible to satisfy pre-auth in the first place.
+
+DECIDED — token shape: an opaque random value (`secrets.token_urlsafe(32)`),
+not a JWT. Unlike the access token and `mfa_pending` token, there are no
+claims worth self-encoding here, and an opaque value makes revocation a
+real DB check rather than something an unrevocable `exp` claim could
+override.
+
+DECIDED — cookie: a second HttpOnly+Secure+SameSite=Strict cookie,
+`refresh_token`, `path=/auth/refresh` — deliberately narrower than the
+access-token cookie's default path, so the refresh token is only ever sent
+to the one endpoint that needs it, not attached to every request.
+`secure` follows the same `ENVIRONMENT=development`-aware fallback
+`_set_access_cookie` already uses (`app/main.py`), not a second copy of
+that logic. TTL: 30 days, sliding — each successful rotation (below) issues
+a fresh 30-day token, not a shrinking one. No absolute session-length cap
+in this version; flagged here as a deliberate simplification, not an
+oversight, revisit if a hard cap is ever required.
+
+DECIDED — `POST /auth/refresh` (new endpoint, no `get_current_user`
+dependency — the whole point is to work when the access token has already
+expired): reads the `refresh_token` cookie, hashes it, looks it up via
+`refresh_token_lookup`. Not found or `expires_at` in the past: 401
+`invalid_token`, both cookies cleared. Found but `revoked_at` already set:
+the token has been used once already — either a legitimate double-submit
+race or a stolen/replayed token — treated as the latter (fail closed): every
+unrevoked `refresh_tokens` row for that `user_id` is revoked in the same
+request, forcing a full re-login on every device, and the response is 401
+`invalid_token`. Found, unrevoked, unexpired: the row is marked revoked
+(`revoked_at = now()`) and a new refresh-token row + new 15-minute access
+token are issued as the response's two cookies, 200 `{"user_id": "..."}`.
+This is the standard rotating-refresh-token-with-reuse-detection pattern
+(each token is single-use; reuse of an already-consumed token is the
+theft signal) — chosen over a non-rotating long-lived refresh token because
+it gives a real detection signal for a leaked cookie instead of none.
+
+DECIDED — issuance points: `POST /auth/login` (non-MFA path) and
+`POST /auth/mfa/challenge` (§8) both now set the `refresh_token` cookie
+alongside the existing access-token cookie, inserting the first
+`refresh_tokens` row for that login. `POST /auth/mfa/setup`/`verify-setup`/
+`disable` are unaffected — they operate on an already-established session
+and neither create nor consume a refresh token.
+
+DECIDED — `POST /auth/logout` (currently a client-side-only cookie clear,
+per `app/auth.py`'s stateless-JWT design) now also revokes the presented
+refresh token server-side (`revoked_at = now()`) before clearing both
+cookies. Without this, logging out would clear the browser's cookie but
+leave a copied refresh token fully valid for another 30 days — the gap this
+whole section exists to close would just move one level down.
+
+DECIDED — `delete_account_cascade` (`app/auth.py`) gains one line in its
+FK-safe delete order — `DELETE FROM refresh_tokens WHERE user_id = :uid`,
+before the `users` delete, same mechanical addition §7 made for `decisions`
+— and `CascadeResult` gains a `refresh_tokens_deleted` field. Not a new
+design decision, just keeping FR-15's cascade complete.
+
+DECIDED — ownership: `app/auth.py`, the `refresh_tokens` migration, and the
+`/auth/refresh` endpoint are Person A's lane (auth + schema, same as §8's
+MFA backend). Frontend wiring — an `api.ts` interceptor that retries once
+through `/auth/refresh` on a 401 before giving up — is a separate follow-up
+PR, same "backend contract lands, frontend follow-up after" split as §7a.
+
+### Security notes
+
+- Refresh tokens are opaque and stored only as a SHA-256 hash — a DB read
+  (even a full dump) does not yield a usable token, unlike `mfa_secret`
+  (§8), which is intentionally plaintext because TOTP verification needs it
+  reversible.
+- Reuse of an already-rotated token revokes every refresh token the user
+  has outstanding, not just the reused one — a suspected-theft response,
+  not a per-token one.
+- No absolute session cap: a continuously-active session can renew
+  indefinitely via rotation. An inactive session's token still expires
+  after 30 days.
+
 ## Change log
 
 - v1 (2026-07-13): initial locked version. All DECIDED items chosen from the
@@ -588,3 +693,15 @@ Compatible with Google Authenticator, Authy, 1Password, etc.
   added (to fix `AccountSettingsPage`'s hardcoded-disabled-state bug) that
   shipped without a contract update at the time. No schema change, no
   changes to any other section.
+- v1.11 (2026-08-27): added §9, refresh tokens — closes the `app/auth.py`
+  TODO open since #25 (15-minute access token, no renewal path). New
+  `refresh_tokens` table (migration 010, opaque-token-hash storage, FORCE
+  RLS plus a `refresh_token_lookup` policy mirroring migration 003's
+  `email_lookup` precedent); a second HttpOnly+Secure+SameSite=Strict
+  cookie scoped to `path=/auth/refresh`; rotating single-use tokens with
+  reuse detection (`POST /auth/refresh`); logout and
+  `delete_account_cascade` both updated to revoke/delete refresh tokens
+  server-side, not just clear the client cookie. Implementation (migration,
+  endpoint, cascade update) and the frontend retry-interceptor follow-up are
+  both still open — this entry locks the shape only, same as §7/§7a's
+  contract-then-implementation split. No changes to any prior section.
