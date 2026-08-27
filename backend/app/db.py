@@ -71,11 +71,14 @@ def app_user_session(user_id: uuid.UUID | None) -> Iterator[Session]:
 
     `user_id=None` skips the SET LOCAL entirely and leaves app.user_id
     unset for the session. This is ONLY safe against a table/policy that
-    doesn't depend on app.user_id being set -- today that is exactly one
-    case, `users` SELECT under the email_lookup policy (migration 003),
-    used by login to find a row by email before any user_id is known. Every
-    other RLS policy in the schema hard-errors on an unset app.user_id
-    (see docs/DECISION_LOG.md, 2026-07-16) rather than silently scoping to
+    doesn't depend on app.user_id being set -- today that is exactly two
+    cases: `users` SELECT under the email_lookup policy (migration 003),
+    used by login to find a row by email before any user_id is known, and
+    `refresh_tokens` SELECT under the refresh_token_lookup policy
+    (migration 010, CONTRACTS.md §9), used by /auth/refresh to find a row
+    by token hash before the user_id it belongs to is known. Every other
+    RLS policy in the schema hard-errors on an unset app.user_id (see
+    docs/DECISION_LOG.md, 2026-07-16) rather than silently scoping to
     nothing, so passing None anywhere else will fail loudly, not leak rows.
     """
     session = SessionLocal()

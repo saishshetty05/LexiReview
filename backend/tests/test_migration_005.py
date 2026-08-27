@@ -172,5 +172,8 @@ def test_login_end_to_end_still_works_after_policy_change(pg_owner_engine):
         assert protected_resp.status_code == 404  # not 401/500 -- auth succeeded
     finally:
         with pg_owner_engine.connect() as conn:
+            # The login above (CONTRACTS.md §9) creates a refresh_tokens
+            # row with no ON DELETE CASCADE back to users -- must go first.
+            conn.execute(text("DELETE FROM refresh_tokens WHERE user_id = :id"), {"id": user.id})
             conn.execute(text("DELETE FROM users WHERE id = :id"), {"id": user.id})
             conn.commit()

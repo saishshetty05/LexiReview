@@ -137,6 +137,26 @@ class Decision(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
+class RefreshToken(Base):
+    """Rotating refresh tokens per CONTRACTS.md §9 (v1.11). Only the SHA-256
+    hash of the raw token is ever stored (app/auth.py's create_refresh_token)
+    -- unlike mfa_secret, a refresh token is only ever compared, never read
+    back, so there is no reason to keep it reversible. Mutable via
+    revoked_at (rotation/logout/reuse-detection all set it, never DELETE it
+    -- app_user has no DELETE grant, migration 010), same
+    mutable-but-not-deletable pattern as `decisions`.
+    """
+
+    __tablename__ = "refresh_tokens"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String, nullable=False, unique=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
 class AuditLog(Base):
     """Content-free audit trail (CLAUDE.md rule 2): metadata only, never
     document text, quotes, findings, or filenames. `ip` is purged after 90

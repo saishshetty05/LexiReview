@@ -21,7 +21,7 @@ from app.auth import (
     decode_access_token,
     delete_account_cascade,
 )
-from app.main import ACCESS_TOKEN_COOKIE, app
+from app.main import ACCESS_TOKEN_COOKIE, REFRESH_TOKEN_COOKIE, app
 
 client = TestClient(app)
 
@@ -46,6 +46,10 @@ def registered_user(pg_owner_engine):
     user_id = uuid.UUID(resp.json()["user_id"])
     yield user_id, email, password
     with pg_owner_engine.connect() as conn:
+        # refresh_tokens FKs into users.id with no ON DELETE CASCADE (same
+        # as every other user-owned table) -- a login in the test body
+        # creates a row here, so it must go before the users delete below.
+        conn.execute(text("DELETE FROM refresh_tokens WHERE user_id = :id"), {"id": user_id})
         conn.execute(text("DELETE FROM users WHERE id = :id"), {"id": user_id})
         conn.commit()
 
@@ -102,6 +106,86 @@ def test_login_wrong_password_rejected(registered_user):
     resp = client.post("/auth/login", json={"email": email, "password": "wrong-password-1!"})
     assert resp.status_code == 401
     assert resp.json()["detail"]["category"] == "invalid_credentials"
+
+
+# ── Refresh tokens (CONTRACTS.md §9, v1.11) ────────────────────────────────
+
+
+def test_login_sets_refresh_cookie(registered_user):
+    _user_id, email, password = registered_user
+    resp = client.post("/auth/login", json={"email": email, "password": password})
+    assert resp.status_code == 200
+    assert REFRESH_TOKEN_COOKIE in resp.cookies
+
+
+def test_refresh_rotates_both_cookies(registered_user):
+    _user_id, email, password = registered_user
+    login_resp = client.post("/auth/login", json={"email": email, "password": password})
+    refresh_token = login_resp.cookies[REFRESH_TOKEN_COOKIE]
+
+    resp = client.post("/auth/refresh", cookies={REFRESH_TOKEN_COOKIE: refresh_token})
+    assert resp.status_code == 200, resp.text
+    assert ACCESS_TOKEN_COOKIE in resp.cookies
+    assert resp.cookies[REFRESH_TOKEN_COOKIE] != refresh_token
+
+
+def test_refresh_missing_cookie_rejected():
+    resp = client.post("/auth/refresh")
+    assert resp.status_code == 401
+    assert resp.json()["detail"]["category"] == "invalid_token"
+
+
+def test_refresh_unknown_token_rejected():
+    resp = client.post("/auth/refresh", cookies={REFRESH_TOKEN_COOKIE: "not-a-real-token"})
+    assert resp.status_code == 401
+    assert resp.json()["detail"]["category"] == "invalid_token"
+
+
+def test_refresh_reuse_of_rotated_token_revokes_the_whole_chain(registered_user):
+    """CONTRACTS.md §9 reuse detection: replaying an already-rotated token
+    is treated as suspected theft -- it revokes every outstanding token for
+    the user, not just the one that was replayed. Verified here by proving
+    the legitimately-rotated token from the first call dies too.
+    """
+    _user_id, email, password = registered_user
+    login_resp = client.post("/auth/login", json={"email": email, "password": password})
+    original_token = login_resp.cookies[REFRESH_TOKEN_COOKIE]
+
+    first_refresh = client.post("/auth/refresh", cookies={REFRESH_TOKEN_COOKIE: original_token})
+    assert first_refresh.status_code == 200
+    rotated_token = first_refresh.cookies[REFRESH_TOKEN_COOKIE]
+
+    reuse_resp = client.post("/auth/refresh", cookies={REFRESH_TOKEN_COOKIE: original_token})
+    assert reuse_resp.status_code == 401
+    assert reuse_resp.json()["detail"]["category"] == "invalid_token"
+
+    rotated_now_dead = client.post("/auth/refresh", cookies={REFRESH_TOKEN_COOKIE: rotated_token})
+    assert rotated_now_dead.status_code == 401
+    assert rotated_now_dead.json()["detail"]["category"] == "invalid_token"
+
+
+def test_logout_revokes_refresh_token(registered_user):
+    _user_id, email, password = registered_user
+    login_resp = client.post("/auth/login", json={"email": email, "password": password})
+    refresh_token = login_resp.cookies[REFRESH_TOKEN_COOKIE]
+    access_token = login_resp.cookies[ACCESS_TOKEN_COOKIE]
+
+    logout_resp = client.post(
+        "/auth/logout",
+        cookies={ACCESS_TOKEN_COOKIE: access_token, REFRESH_TOKEN_COOKIE: refresh_token},
+    )
+    assert logout_resp.status_code == 200
+
+    resp = client.post("/auth/refresh", cookies={REFRESH_TOKEN_COOKIE: refresh_token})
+    assert resp.status_code == 401
+    assert resp.json()["detail"]["category"] == "invalid_token"
+
+
+def test_logout_without_refresh_cookie_still_succeeds():
+    # No refresh_token cookie sent at all -- logout must not require one
+    # (e.g. a session that predates this feature, or one already expired).
+    resp = client.post("/auth/logout")
+    assert resp.status_code == 200
 
 
 def test_login_rate_limited_after_too_many_attempts(registered_user):
@@ -201,7 +285,13 @@ def test_delete_account_removes_all_rows_and_nulls_audit_log(pg_owner_engine, re
     assert resp.status_code == 200, resp.text
 
     with pg_owner_engine.connect() as conn:
-        for table in ("documents", "analysis_jobs", "analysis_results", "document_summaries"):
+        for table in (
+            "documents",
+            "analysis_jobs",
+            "analysis_results",
+            "document_summaries",
+            "refresh_tokens",
+        ):
             count = conn.execute(
                 text(f"SELECT count(*) FROM {table} WHERE user_id = :uid"), {"uid": user_id}
             ).scalar_one()

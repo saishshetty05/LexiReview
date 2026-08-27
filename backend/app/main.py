@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import (
     ACCESS_TOKEN_TTL_MINUTES,
+    REFRESH_TOKEN_TTL_DAYS,
     AuthError,
     InvalidTokenError,
     MFARateLimitedError,
@@ -27,11 +28,14 @@ from app.auth import (
     build_totp_uri,
     create_access_token,
     create_mfa_pending_token,
+    create_refresh_token,
     decode_access_token,
     decode_mfa_pending_token,
     delete_account_cascade,
     generate_mfa_secret,
     register,
+    revoke_refresh_token,
+    rotate_refresh_token,
     verify_totp_code,
 )
 from app.mfa_redis import check_and_increment_challenge_attempt, clear_challenge_attempts
@@ -51,6 +55,11 @@ from app.storage import (
 app = FastAPI(title="LexiReview API")
 
 ACCESS_TOKEN_COOKIE = "access_token"  # nosec B105 -- cookie name, not a credential
+REFRESH_TOKEN_COOKIE = "refresh_token"  # nosec B105 -- cookie name, not a credential
+# CONTRACTS.md §9 (v1.11): scoped narrower than the access-token cookie's
+# default "/" path -- the refresh token is only ever sent to the one
+# endpoint that consumes it, not attached to every request.
+REFRESH_TOKEN_COOKIE_PATH = "/auth/refresh"
 
 _SEVERITY_ORDER = {"high": 0, "medium": 1, "low": 2, "info": 3}
 
@@ -124,6 +133,19 @@ def _set_access_cookie(response: Response, token: str) -> None:
     )
 
 
+def _set_refresh_cookie(response: Response, token: str) -> None:
+    is_dev = os.environ.get("ENVIRONMENT") == "development"
+    response.set_cookie(
+        REFRESH_TOKEN_COOKIE,
+        token,
+        httponly=True,
+        secure=not is_dev,
+        samesite="strict",
+        max_age=REFRESH_TOKEN_TTL_DAYS * 24 * 60 * 60,
+        path=REFRESH_TOKEN_COOKIE_PATH,
+    )
+
+
 def get_current_user(request: Request) -> Iterator[tuple[User, Session]]:
     """Dependency for every protected endpoint: validates the JWT cookie and
     holds a request-scoped app_user_session open for its lifetime -- this is
@@ -173,6 +195,8 @@ def auth_login(body: LoginRequest, response: Response) -> dict:
     # Non-MFA user: normal flow
     token = create_access_token(user.id)
     _set_access_cookie(response, token)
+    refresh_token = create_refresh_token(user.id)
+    _set_refresh_cookie(response, refresh_token)
     return {"user_id": str(user.id)}
 
 
@@ -292,16 +316,45 @@ def auth_mfa_challenge(body: MFAChallengeRequest, response: Response) -> dict:
     clear_challenge_attempts(user_id, jti)
     token = create_access_token(user_id)
     _set_access_cookie(response, token)
+    refresh_token = create_refresh_token(user_id)
+    _set_refresh_cookie(response, refresh_token)
+    return {"user_id": str(user_id)}
+
+
+@app.post("/auth/refresh")
+def auth_refresh(request: Request, response: Response) -> dict:
+    """Exchange a valid refresh token for a fresh access token + a rotated
+    refresh token (CONTRACTS.md §9). No get_current_user dependency — the
+    whole point is to work once the access token has already expired.
+    """
+    token = request.cookies.get(REFRESH_TOKEN_COOKIE)
+    if not token:
+        raise HTTPException(status_code=401, detail={"category": "invalid_token"})
+    try:
+        user_id, new_refresh_token = rotate_refresh_token(token)
+    except InvalidTokenError as exc:
+        response.delete_cookie(ACCESS_TOKEN_COOKIE)
+        response.delete_cookie(REFRESH_TOKEN_COOKIE, path=REFRESH_TOKEN_COOKIE_PATH)
+        raise _auth_error_response(exc) from exc
+
+    access_token = create_access_token(user_id)
+    _set_access_cookie(response, access_token)
+    _set_refresh_cookie(response, new_refresh_token)
     return {"user_id": str(user_id)}
 
 
 @app.post("/auth/logout")
-def auth_logout(response: Response) -> dict:
-    # Stateless JWT: logout is client-side token discard. Clearing the
-    # cookie here covers the browser client; any other holder of the token
-    # remains valid until it expires (ACCESS_TOKEN_TTL_MINUTES) -- no server
-    # session table in this PR (see app/auth.py module docstring TODO).
+def auth_logout(request: Request, response: Response) -> dict:
+    # Access token: client-side discard, same as before (stateless JWT).
+    # Refresh token: now also revoked server-side (CONTRACTS.md §9) --
+    # otherwise a copied refresh cookie would stay valid for
+    # REFRESH_TOKEN_TTL_DAYS after "logout," which would just move this
+    # PR's whole reason for existing one level down.
+    refresh_token = request.cookies.get(REFRESH_TOKEN_COOKIE)
+    if refresh_token:
+        revoke_refresh_token(refresh_token)
     response.delete_cookie(ACCESS_TOKEN_COOKIE)
+    response.delete_cookie(REFRESH_TOKEN_COOKIE, path=REFRESH_TOKEN_COOKIE_PATH)
     return {"status": "logged_out"}
 
 
@@ -313,6 +366,7 @@ def auth_delete_account(
     user_id: uuid.UUID = user.id
     delete_account_cascade(user_id)
     response.delete_cookie(ACCESS_TOKEN_COOKIE)
+    response.delete_cookie(REFRESH_TOKEN_COOKIE, path=REFRESH_TOKEN_COOKIE_PATH)
     return {"status": "deleted"}
 
 
