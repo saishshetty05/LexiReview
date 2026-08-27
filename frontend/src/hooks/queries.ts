@@ -160,12 +160,31 @@ export function useMFASetupMutation() {
   return useMutation({ mutationFn: mfaSetup });
 }
 
+// Both mutations change server-side mfa_enabled. Cancelling the in-flight
+// ["mfa-status"] fetch before invalidating stops a request that started
+// before this mutation (and so still carries pre-mutation data) from
+// landing in the cache after it -- otherwise that stale response overwrites
+// the mfaState the component just set locally.
 export function useMFAVerifySetupMutation() {
-  return useMutation({ mutationFn: mfaVerifySetup });
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: mfaVerifySetup,
+    onSuccess: async () => {
+      await queryClient.cancelQueries({ queryKey: ["mfa-status"] });
+      queryClient.invalidateQueries({ queryKey: ["mfa-status"] });
+    },
+  });
 }
 
 export function useMFADisableMutation() {
-  return useMutation({ mutationFn: mfaDisable });
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: mfaDisable,
+    onSuccess: async () => {
+      await queryClient.cancelQueries({ queryKey: ["mfa-status"] });
+      queryClient.invalidateQueries({ queryKey: ["mfa-status"] });
+    },
+  });
 }
 
 export function useMFAChallengeMutation() {
