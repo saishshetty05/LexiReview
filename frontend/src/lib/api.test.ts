@@ -117,7 +117,7 @@ describe("request() refresh-retry (CONTRACTS.md §9)", () => {
       .mockResolvedValueOnce(jsonResponse(401, { detail: { category: "invalid_token" } }))
       .mockResolvedValueOnce(jsonResponse(200, { status: "ok" })) // /auth/refresh
       .mockResolvedValueOnce(
-        new Response(new Blob(["bytes"]), {
+        new Response("bytes", {
           status: 200,
           headers: { "Content-Type": "application/pdf" },
         }),
