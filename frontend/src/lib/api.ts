@@ -57,25 +57,78 @@ const CATEGORY_MESSAGES: Record<string, string> = {
   mfa_rate_limited: "Too many failed attempts. Please wait a few minutes and try again.",
 };
 
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+// A 401 in one of these categories means the access token itself is
+// unusable (missing or expired/invalid) -- worth one silent retry through
+// /auth/refresh (CONTRACTS.md §9) before surfacing the error. Any other
+// category (bad credentials, a wrong MFA code, MFA already enabled, ...) is
+// a real answer to the request itself, not a stale session, and must not
+// trigger a refresh attempt.
+const SESSION_EXPIRED_CATEGORIES = new Set(["missing_token", "invalid_token"]);
+
+// Paths exempt from the retry above even when the category matches:
+// /auth/mfa/challenge's invalid_token means the short-lived mfa_pending
+// token expired mid-2FA-flow, not that an established session went stale --
+// there's no access-token session yet at that point to refresh. (There's no
+// /auth/refresh entry here: refreshAccessToken() below calls a raw fetch,
+// never request(), so recursion into this function isn't reachable in the
+// first place.)
+const NO_REFRESH_RETRY_PATHS = new Set(["/auth/mfa/challenge"]);
+
+let refreshInFlight: Promise<boolean> | null = null;
+
+// Exchanges the refresh_token cookie for a fresh access token + rotated
+// refresh token. Concurrent 401s share one in-flight attempt instead of
+// each firing their own -- rotation is single-use, so a second concurrent
+// call would find the first call's token already consumed and, per the
+// backend's reuse-detection design, revoke every outstanding refresh token
+// for the user, forcing a full re-login.
+function refreshAccessToken(): Promise<boolean> {
+  if (!refreshInFlight) {
+    refreshInFlight = fetch("/auth/refresh", { method: "POST", credentials: "include" })
+      .then((resp) => resp.ok)
+      .catch(() => false)
+      .finally(() => {
+        refreshInFlight = null;
+      });
+  }
+  return refreshInFlight;
+}
+
+async function parseErrorResponse(
+  resp: Response,
+): Promise<{ category: string; message: string; detailObj?: Record<string, unknown> }> {
+  let category = `http_${resp.status}`;
+  let message = `Request failed (${resp.status}).`;
+  let detailObj: Record<string, unknown> | undefined;
+  try {
+    const body = await resp.json();
+    const detail = body?.detail;
+    if (typeof detail === "string") {
+      message = detail;
+    } else if (detail && typeof detail === "object") {
+      detailObj = detail;
+      category = detail.category ?? category;
+      message = detail.message ?? CATEGORY_MESSAGES[category] ?? message;
+    }
+  } catch {
+    // Non-JSON or empty error body -- keep the generic fallback above.
+  }
+  return { category, message, detailObj };
+}
+
+async function request<T>(path: string, options: RequestInit = {}, isRetry = false): Promise<T> {
   const resp = await fetch(path, { ...options, credentials: "include" });
 
   if (!resp.ok) {
-    let category = `http_${resp.status}`;
-    let message = `Request failed (${resp.status}).`;
-    let detailObj: Record<string, unknown> | undefined;
-    try {
-      const body = await resp.json();
-      const detail = body?.detail;
-      if (typeof detail === "string") {
-        message = detail;
-      } else if (detail && typeof detail === "object") {
-        detailObj = detail;
-        category = detail.category ?? category;
-        message = detail.message ?? CATEGORY_MESSAGES[category] ?? message;
-      }
-    } catch {
-      // Non-JSON or empty error body -- keep the generic fallback above.
+    const { category, message, detailObj } = await parseErrorResponse(resp);
+
+    if (
+      !isRetry &&
+      SESSION_EXPIRED_CATEGORIES.has(category) &&
+      !NO_REFRESH_RETRY_PATHS.has(path) &&
+      (await refreshAccessToken())
+    ) {
+      return request<T>(path, options, true);
     }
     throw new ApiError(resp.status, category, message, detailObj);
   }
@@ -258,26 +311,23 @@ export interface DocumentFile {
   contentType: string;
 }
 
-export async function getDocumentFile(docId: string): Promise<DocumentFile> {
-  const resp = await fetch(`/documents/${docId}/file`, { credentials: "include" });
+async function fetchDocumentFile(docId: string, isRetry: boolean): Promise<DocumentFile> {
+  const path = `/documents/${docId}/file`;
+  const resp = await fetch(path, { credentials: "include" });
   if (!resp.ok) {
-    let category = `http_${resp.status}`;
-    let message = `Request failed (${resp.status}).`;
-    try {
-      const body = await resp.json();
-      const detail = body?.detail;
-      if (typeof detail === "string") message = detail;
-      else if (detail && typeof detail === "object") {
-        category = detail.category ?? category;
-        message = detail.message ?? CATEGORY_MESSAGES[category] ?? message;
-      }
-    } catch {
-      // Non-JSON error body -- keep the generic fallback.
+    const { category, message, detailObj } = await parseErrorResponse(resp);
+
+    if (!isRetry && SESSION_EXPIRED_CATEGORIES.has(category) && (await refreshAccessToken())) {
+      return fetchDocumentFile(docId, true);
     }
-    throw new ApiError(resp.status, category, message);
+    throw new ApiError(resp.status, category, message, detailObj);
   }
   const blob = await resp.blob();
   return { blob, contentType: resp.headers.get("Content-Type") ?? "application/octet-stream" };
+}
+
+export function getDocumentFile(docId: string): Promise<DocumentFile> {
+  return fetchDocumentFile(docId, false);
 }
 
 export function getDocuments(): Promise<DocumentListItem[]> {
