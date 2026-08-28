@@ -1,15 +1,15 @@
-"""Authentication: register, login, logout (stateless), delete-account cascade.
+"""Authentication: register, login, logout, refresh, delete-account cascade.
 
 Password hashing via passlib/bcrypt. JWT access tokens (pyjwt), delivered as
 an HttpOnly+Secure+SameSite=Strict cookie by app/main.py -- NEVER localStorage
-(SEC-6). Logout is client-side token discard; there is no server-side session
-table for a stateless JWT (constitution/task scope, this PR).
+(SEC-6).
 
-TODO: refresh-token strategy is out of scope for this PR. Access tokens are
-short-lived (15 min); once expired, the client must log in again. A refresh
-token (rotating, stored server-side or as a second HttpOnly cookie) should be
-added before this ships to real users, so a 15-minute session isn't the
-actual UX.
+Refresh tokens (CONTRACTS.md §9, v1.11) close the "15-minute session is the
+actual UX" gap: an opaque, rotating, single-use token delivered as a second
+HttpOnly cookie scoped to /auth/refresh. Reuse of an already-rotated token
+revokes every outstanding token for that user (fail-closed on suspected
+theft). Logout now revokes the presented refresh token server-side, not just
+the client-side JWT cookie clear it always did.
 
 MFA (TOTP) — opt-in, never mandatory. Uses pyotp for TOTP generation/
 verification, qrcode[pil] for QR image. mfa_pending token is a short-lived
@@ -18,8 +18,10 @@ JWT (5 min) with custom claim mfa_pending=true; only valid for the
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import re
+import secrets
 import time
 import uuid
 from collections import defaultdict
@@ -29,11 +31,11 @@ from datetime import datetime, timedelta, timezone
 import jwt
 import pyotp
 from passlib.hash import bcrypt
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import create_engine, select, text, update
 from sqlalchemy.exc import IntegrityError
 
 from app.db import _normalize, app_user_session
-from app.models import User
+from app.models import RefreshToken, User
 
 ACCESS_TOKEN_TTL_MINUTES = 15
 JWT_ALGORITHM = "HS256"
@@ -139,6 +141,106 @@ def decode_access_token(token: str) -> uuid.UUID:
         return uuid.UUID(payload["sub"])
     except (jwt.PyJWTError, KeyError, ValueError) as exc:
         raise InvalidTokenError("token is missing, expired, or invalid") from exc
+
+
+# ── Refresh tokens (CONTRACTS.md §9, v1.11) ────────────────────────────────
+
+REFRESH_TOKEN_TTL_DAYS = 30
+
+
+def _hash_refresh_token(raw_token: str) -> str:
+    return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
+
+
+def create_refresh_token(user_id: uuid.UUID) -> str:
+    """Issue and store a new refresh token for `user_id`. Returns the raw
+    token -- the only moment it exists outside the hash, never stored,
+    never logged (CLAUDE.md rule 2 applies to bearer credentials same as
+    document content).
+    """
+    raw_token = secrets.token_urlsafe(32)
+    now = datetime.now(timezone.utc)
+    with app_user_session(user_id) as session:
+        session.add(
+            RefreshToken(
+                user_id=user_id,
+                token_hash=_hash_refresh_token(raw_token),
+                created_at=now,
+                expires_at=now + timedelta(days=REFRESH_TOKEN_TTL_DAYS),
+            )
+        )
+        session.flush()
+    return raw_token
+
+
+def rotate_refresh_token(raw_token: str) -> tuple[uuid.UUID, str]:
+    """Validate and rotate a refresh token per CONTRACTS.md §9.
+
+    Raises InvalidTokenError if the token is missing/unknown/expired, or if
+    reuse of an already-consumed token is detected -- in which case every
+    outstanding refresh token for that user is revoked as a fail-closed
+    response to suspected theft, not just the reused one.
+
+    Returns (user_id, new_raw_token) on success. The caller (app/main.py)
+    is responsible for issuing a fresh access token and setting both
+    cookies.
+    """
+    token_hash = _hash_refresh_token(raw_token)
+
+    # Pre-auth lookup: user_id isn't known yet -- same bootstrapping
+    # problem authenticate()'s email lookup solves for login, via the same
+    # app_user_session(None) + a policy that doesn't depend on app.user_id
+    # (migration 010's refresh_token_lookup, mirroring 003's email_lookup).
+    with app_user_session(None) as session:
+        row = session.execute(
+            select(RefreshToken).where(RefreshToken.token_hash == token_hash)
+        ).scalar_one_or_none()
+
+    if row is None:
+        raise InvalidTokenError("token is missing, expired, or invalid")
+
+    now = datetime.now(timezone.utc)
+    if row.expires_at < now:
+        raise InvalidTokenError("token is missing, expired, or invalid")
+
+    user_id = row.user_id
+
+    if row.revoked_at is not None:
+        # Reuse of an already-consumed token: fail closed, not open -- kill
+        # every unrevoked token for this user rather than just this one.
+        with app_user_session(user_id) as session:
+            session.execute(
+                update(RefreshToken)
+                .where(RefreshToken.user_id == user_id, RefreshToken.revoked_at.is_(None))
+                .values(revoked_at=now)
+            )
+        raise InvalidTokenError("token is missing, expired, or invalid")
+
+    with app_user_session(user_id) as session:
+        session.execute(
+            update(RefreshToken).where(RefreshToken.id == row.id).values(revoked_at=now)
+        )
+    return user_id, create_refresh_token(user_id)
+
+
+def revoke_refresh_token(raw_token: str) -> None:
+    """Revoke a single refresh token (logout). No-op if the token is
+    missing or already revoked -- logout must never fail because of stale
+    token state.
+    """
+    token_hash = _hash_refresh_token(raw_token)
+    with app_user_session(None) as session:
+        row = session.execute(
+            select(RefreshToken).where(RefreshToken.token_hash == token_hash)
+        ).scalar_one_or_none()
+    if row is None or row.revoked_at is not None:
+        return
+    with app_user_session(row.user_id) as session:
+        session.execute(
+            update(RefreshToken)
+            .where(RefreshToken.id == row.id)
+            .values(revoked_at=datetime.now(timezone.utc))
+        )
 
 
 # ── MFA (TOTP) helpers ──────────────────────────────────────────────────────
@@ -268,6 +370,7 @@ class CascadeResult:
     analysis_results_deleted: int
     document_summaries_deleted: int
     decisions_deleted: int
+    refresh_tokens_deleted: int
     audit_log_rows_nulled: int
 
 
@@ -277,15 +380,15 @@ def delete_account_cascade(user_id: uuid.UUID) -> CascadeResult:
     !!! THE ONLY CODE PATH IN THIS PROJECT ALLOWED TO CONNECT AS THE OWNER
     ROLE (DATABASE_URL) INSTEAD OF app_user. !!!
     app_user has no DELETE grant on documents/analysis_jobs/analysis_results
-    /document_summaries/decisions/audit_log/users BY DESIGN (migration
-    001/002/006, docs/DECISION_LOG.md 2026-07-15) -- that is what makes
-    every other table immutable at the DB layer, not just in app code (note:
-    decisions is mutable via UPDATE, per migration 006, but still has no
-    DELETE grant). This function bypasses that deliberately, via a separate
-    privileged connection, because account deletion is the one place
-    immutability must yield to a legal SLA. Do NOT copy this pattern
-    anywhere else; every other read/write in this codebase must go through
-    app_user_session.
+    /document_summaries/decisions/refresh_tokens/audit_log/users BY DESIGN
+    (migration 001/002/006/010, docs/DECISION_LOG.md 2026-07-15) -- that is
+    what makes every other table immutable at the DB layer, not just in app
+    code (note: decisions and refresh_tokens are mutable via UPDATE, per
+    migrations 006/010, but still have no DELETE grant). This function
+    bypasses that deliberately, via a separate privileged connection,
+    because account deletion is the one place immutability must yield to a
+    legal SLA. Do NOT copy this pattern anywhere else; every other
+    read/write in this codebase must go through app_user_session.
 
     audit_log rows are NOT deleted (content-free per CLAUDE.md rule 2, IPs
     purged separately after 90 days per FR-8) -- only their user_id
@@ -294,8 +397,11 @@ def delete_account_cascade(user_id: uuid.UUID) -> CascadeResult:
 
     Deletes in FK-safe order, in one transaction: decisions ->
     analysis_results -> document_summaries -> analysis_jobs -> documents ->
-    (null audit_log.user_id) -> users. `decisions` goes first since it FKs
-    into analysis_results.id (CONTRACTS.md §7, migration 006).
+    refresh_tokens -> (null audit_log.user_id) -> users. `decisions` goes
+    first since it FKs into analysis_results.id (CONTRACTS.md §7, migration
+    006); `refresh_tokens` only FKs into users.id (CONTRACTS.md §9,
+    migration 010) so its position relative to the other tables doesn't
+    matter, only that it happens before `users`.
     """
     # NOTE: this reads the raw DATABASE_URL env var directly -- NOT
     # app.db.DATABASE_URL, which despite the name is the app's *resolved
@@ -323,6 +429,9 @@ def delete_account_cascade(user_id: uuid.UUID) -> CascadeResult:
             documents_deleted = conn.execute(
                 text("DELETE FROM documents WHERE user_id = :uid"), {"uid": user_id}
             ).rowcount
+            refresh_tokens_deleted = conn.execute(
+                text("DELETE FROM refresh_tokens WHERE user_id = :uid"), {"uid": user_id}
+            ).rowcount
             audit_nulled = conn.execute(
                 text("UPDATE audit_log SET user_id = NULL WHERE user_id = :uid"), {"uid": user_id}
             ).rowcount
@@ -336,5 +445,6 @@ def delete_account_cascade(user_id: uuid.UUID) -> CascadeResult:
         analysis_results_deleted=results_deleted,
         document_summaries_deleted=summaries_deleted,
         decisions_deleted=decisions_deleted,
+        refresh_tokens_deleted=refresh_tokens_deleted,
         audit_log_rows_nulled=audit_nulled,
     )
