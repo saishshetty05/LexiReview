@@ -343,16 +343,33 @@ def auth_refresh(request: Request, response: Response) -> dict:
     return {"user_id": str(user_id)}
 
 
-@app.post("/auth/logout")
-def auth_logout(request: Request, response: Response) -> dict:
-    # Access token: client-side discard, same as before (stateless JWT).
-    # Refresh token: now also revoked server-side (CONTRACTS.md §9) --
-    # otherwise a copied refresh cookie would stay valid for
-    # REFRESH_TOKEN_TTL_DAYS after "logout," which would just move this
-    # PR's whole reason for existing one level down.
+@app.post("/auth/refresh/revoke")
+def auth_refresh_revoke(request: Request, response: Response) -> dict:
+    """The real logout endpoint (CONTRACTS.md §9, v1.12).
+
+    `path=/auth/refresh` is a prefix of this route's path, so the refresh
+    cookie -- never attached to `/auth/logout` -- IS attached here (RFC 6265
+    §5.1.4). No `get_current_user` dependency: must still succeed (clearing
+    cookies) for an already-expired session. Idempotent, unlike
+    `/auth/refresh` -- a missing or already-revoked refresh cookie is still
+    a 200, never a 401, since logging out twice must never error.
+    """
     refresh_token = request.cookies.get(REFRESH_TOKEN_COOKIE)
     if refresh_token:
         revoke_refresh_token(refresh_token)
+    response.delete_cookie(ACCESS_TOKEN_COOKIE)
+    response.delete_cookie(REFRESH_TOKEN_COOKIE, path=REFRESH_TOKEN_COOKIE_PATH)
+    return {"status": "logged_out"}
+
+
+@app.post("/auth/logout")
+def auth_logout(response: Response) -> dict:
+    # Client-side cookie clear only. The refresh cookie's path=/auth/refresh
+    # scoping means it's never attached here, so there is no server-side
+    # revocation to attempt (CONTRACTS.md §9, v1.12) -- callers that need
+    # the refresh token actually revoked must hit /auth/refresh/revoke,
+    # which the frontend now uses for its logout action instead of this
+    # endpoint.
     response.delete_cookie(ACCESS_TOKEN_COOKIE)
     response.delete_cookie(REFRESH_TOKEN_COOKIE, path=REFRESH_TOKEN_COOKIE_PATH)
     return {"status": "logged_out"}

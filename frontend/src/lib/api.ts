@@ -174,7 +174,13 @@ export function deleteAccount(): Promise<{ status: string }> {
 }
 
 export function logout(): Promise<{ status: string }> {
-  return request("/auth/logout", { method: "POST" });
+  // /auth/refresh/revoke, not /auth/logout: the refresh cookie's
+  // path=/auth/refresh scoping means only a path under /auth/refresh
+  // receives it, so this is the endpoint that actually revokes the
+  // session server-side (CONTRACTS.md §9, v1.12). No get_current_user
+  // dependency on that route, so this never 401s/retries regardless of
+  // access-token state.
+  return request("/auth/refresh/revoke", { method: "POST" });
 }
 
 export interface UploadResult {

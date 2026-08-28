@@ -164,7 +164,13 @@ def test_refresh_reuse_of_rotated_token_revokes_the_whole_chain(registered_user)
     assert rotated_now_dead.json()["detail"]["category"] == "invalid_token"
 
 
-def test_logout_revokes_refresh_token(registered_user):
+def test_logout_does_not_revoke_refresh_token(registered_user):
+    # CONTRACTS.md §9 v1.12: /auth/logout is cookie-clearing only now --
+    # the refresh cookie's path=/auth/refresh scoping means it was never
+    # actually reachable here in a real browser in the first place (see
+    # the real-cookie-jar regression tests below), so the revoke call this
+    # endpoint used to attempt was dead code. /auth/refresh/revoke is the
+    # endpoint that actually revokes.
     _user_id, email, password = registered_user
     login_resp = client.post("/auth/login", json={"email": email, "password": password})
     refresh_token = login_resp.cookies[REFRESH_TOKEN_COOKIE]
@@ -177,8 +183,7 @@ def test_logout_revokes_refresh_token(registered_user):
     assert logout_resp.status_code == 200
 
     resp = client.post("/auth/refresh", cookies={REFRESH_TOKEN_COOKIE: refresh_token})
-    assert resp.status_code == 401
-    assert resp.json()["detail"]["category"] == "invalid_token"
+    assert resp.status_code == 200
 
 
 def test_logout_without_refresh_cookie_still_succeeds():
@@ -186,6 +191,113 @@ def test_logout_without_refresh_cookie_still_succeeds():
     # (e.g. a session that predates this feature, or one already expired).
     resp = client.post("/auth/logout")
     assert resp.status_code == 200
+
+
+# ── Refresh-token revocation on logout, the real fix (CONTRACTS.md §9, v1.12) ──
+
+
+def test_refresh_revoke_revokes_the_refresh_token(registered_user):
+    _user_id, email, password = registered_user
+    login_resp = client.post("/auth/login", json={"email": email, "password": password})
+    refresh_token = login_resp.cookies[REFRESH_TOKEN_COOKIE]
+    access_token = login_resp.cookies[ACCESS_TOKEN_COOKIE]
+
+    revoke_resp = client.post(
+        "/auth/refresh/revoke",
+        cookies={ACCESS_TOKEN_COOKIE: access_token, REFRESH_TOKEN_COOKIE: refresh_token},
+    )
+    assert revoke_resp.status_code == 200
+    assert revoke_resp.json() == {"status": "logged_out"}
+
+    resp = client.post("/auth/refresh", cookies={REFRESH_TOKEN_COOKIE: refresh_token})
+    assert resp.status_code == 401
+    assert resp.json()["detail"]["category"] == "invalid_token"
+
+
+def test_refresh_revoke_without_refresh_cookie_still_succeeds():
+    resp = client.post("/auth/refresh/revoke")
+    assert resp.status_code == 200
+    assert resp.json() == {"status": "logged_out"}
+
+
+def test_refresh_revoke_is_idempotent_not_a_401_on_replay(registered_user):
+    # Unlike /auth/refresh's reuse detection (theft signal -> 401 + revoke
+    # everything), a *second* logout with the same already-revoked cookie
+    # must still be 200 -- logging out twice, or logging out with an
+    # already-expired session, must never error.
+    _user_id, email, password = registered_user
+    login_resp = client.post("/auth/login", json={"email": email, "password": password})
+    refresh_token = login_resp.cookies[REFRESH_TOKEN_COOKIE]
+
+    first = client.post("/auth/refresh/revoke", cookies={REFRESH_TOKEN_COOKIE: refresh_token})
+    assert first.status_code == 200
+
+    second = client.post("/auth/refresh/revoke", cookies={REFRESH_TOKEN_COOKIE: refresh_token})
+    assert second.status_code == 200
+    assert second.json() == {"status": "logged_out"}
+
+
+def test_refresh_revoke_receives_the_refresh_cookie_through_real_path_scoped_attachment(
+    registered_user,
+):
+    """The regression this endpoint exists to fix (DECISION_LOG.md
+    2026-08-28, CONTRACTS.md §9 v1.12). Unlike every other test in this
+    file, this one does NOT manually attach `cookies={...}` per request --
+    it lets httpx's own cookie jar decide what gets attached where, via a
+    fresh client so this test's cookies can't leak into/from others. That
+    jar applies real RFC 6265 path matching, the same mechanism a browser
+    uses and the same mechanism that hid the /auth/logout bug from every
+    other test in this file (they all manually attach cookies, bypassing
+    path matching entirely). base_url must be https:// -- both cookies are
+    Secure (CI sets no ENVIRONMENT=development override), and a Secure
+    cookie is dropped by the jar over a plain http:// base_url even in
+    tests, same as a real browser would drop it over plain HTTP.
+    """
+    _user_id, email, password = registered_user
+    with TestClient(app, base_url="https://testserver") as jar_client:
+        login_resp = jar_client.post("/auth/login", json={"email": email, "password": password})
+        assert login_resp.status_code == 200
+        refresh_token = jar_client.cookies[REFRESH_TOKEN_COOKIE]  # sanity: jar actually got it
+
+        revoke_resp = jar_client.post("/auth/refresh/revoke")  # no cookies= kwarg, on purpose
+        assert revoke_resp.status_code == 200
+
+    # Replay via a throwaway client, not the shared module-level `client` --
+    # a successful /auth/refresh sets real cookies in its response, and the
+    # shared client's jar persists those across tests (confirmed: it's what
+    # let a prior draft of this test pollute test_get_current_user_rejects_
+    # missing_token, run later in this file). Proves the token was actually
+    # revoked server-side, not just that the call 200'd.
+    with TestClient(app) as fresh_client:
+        resp = fresh_client.post("/auth/refresh", cookies={REFRESH_TOKEN_COOKIE: refresh_token})
+    assert resp.status_code == 401
+    assert resp.json()["detail"]["category"] == "invalid_token"
+
+
+def test_logout_endpoint_never_receives_refresh_cookie_through_real_path_scoped_attachment(
+    registered_user,
+):
+    """Companion to the test above: proves /auth/logout genuinely never
+    gets the refresh cookie either, through the same real-jar mechanism --
+    confirming why /auth/refresh/revoke has to exist as a separate
+    endpoint rather than /auth/logout just being fixed in place.
+    """
+    _user_id, email, password = registered_user
+    with TestClient(app, base_url="https://testserver") as jar_client:
+        login_resp = jar_client.post("/auth/login", json={"email": email, "password": password})
+        assert login_resp.status_code == 200
+        refresh_token = jar_client.cookies[REFRESH_TOKEN_COOKIE]
+
+        logout_resp = jar_client.post("/auth/logout")
+        assert logout_resp.status_code == 200
+
+    # Throwaway client, not the shared `client` -- see the comment on the
+    # sibling test above for why (a successful /auth/refresh here sets a
+    # real, working access_token that would otherwise leak into the shared
+    # jar and pollute whatever test runs next).
+    with TestClient(app) as fresh_client:
+        resp = fresh_client.post("/auth/refresh", cookies={REFRESH_TOKEN_COOKIE: refresh_token})
+    assert resp.status_code == 200  # still valid -- /auth/logout never touched it
 
 
 def test_login_rate_limited_after_too_many_attempts(registered_user):
