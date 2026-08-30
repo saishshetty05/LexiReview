@@ -173,7 +173,20 @@ export function deleteAccount(): Promise<{ status: string }> {
   return request("/auth/account", { method: "DELETE" });
 }
 
-export function logout(): Promise<{ status: string }> {
+export async function logout(): Promise<{ status: string }> {
+  // Revoke the refresh token server-side first. /auth/refresh/revoke is the
+  // only endpoint whose path matches the refresh_token cookie's
+  // path=/auth/refresh scope (RFC 6265 prefix matching), so it's the one call
+  // that can actually present the token for revocation. Then /auth/logout
+  // clears both cookies client-side (the stateless-JWT clear). Without this,
+  // a copied refresh cookie would stay valid for the full 30-day TTL after
+  // "logout" (CONTRACTS.md §9; DECISION_LOG 2026-08-28).
+  try {
+    await request("/auth/refresh/revoke", { method: "POST" });
+  } catch {
+    // Best-effort -- a missing/expired refresh token must not block the
+    // client-side logout from completing; revoke is a no-op in that case.
+  }
   return request("/auth/logout", { method: "POST" });
 }
 

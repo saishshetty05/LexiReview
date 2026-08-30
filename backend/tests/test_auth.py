@@ -164,21 +164,48 @@ def test_refresh_reuse_of_rotated_token_revokes_the_whole_chain(registered_user)
     assert rotated_now_dead.json()["detail"]["category"] == "invalid_token"
 
 
-def test_logout_revokes_refresh_token(registered_user):
+def test_refresh_revoke_endpoint_revokes_token(registered_user):
+    """CONTRACTS.md §9: POST /auth/refresh/revoke is the server-side
+    revocation path the frontend calls before /auth/logout. In a real browser
+    the cookie's path=/auth/refresh scoping delivers it to
+    /auth/refresh/revoke via RFC 6265 prefix matching (/auth/refresh is a
+    prefix of /auth/refresh/revoke). Here we pass it explicitly because the
+    TestClient's cookie jar doesn't reliably deliver Secure cookies over
+    http://testserver across httpx versions.
+    """
     _user_id, email, password = registered_user
     login_resp = client.post("/auth/login", json={"email": email, "password": password})
     refresh_token = login_resp.cookies[REFRESH_TOKEN_COOKIE]
-    access_token = login_resp.cookies[ACCESS_TOKEN_COOKIE]
 
-    logout_resp = client.post(
-        "/auth/logout",
-        cookies={ACCESS_TOKEN_COOKIE: access_token, REFRESH_TOKEN_COOKIE: refresh_token},
+    revoke_resp = client.post(
+        "/auth/refresh/revoke",
+        cookies={REFRESH_TOKEN_COOKIE: refresh_token},
     )
-    assert logout_resp.status_code == 200
+    assert revoke_resp.status_code == 200
 
     resp = client.post("/auth/refresh", cookies={REFRESH_TOKEN_COOKIE: refresh_token})
     assert resp.status_code == 401
     assert resp.json()["detail"]["category"] == "invalid_token"
+
+
+def test_logout_is_client_side_clear_and_does_not_revoke(registered_user):
+    """POST /auth/logout is back to a pure client-side cookie clear (its
+    original stateless-JWT role). It cannot revoke server-side — the
+    refresh_token cookie's path=/auth/refresh is never attached to
+    /auth/logout by RFC 6265 prefix matching, and revocation is the revoke
+    endpoint's job. Guards the §9 split.
+    """
+    _user_id, email, password = registered_user
+    login_resp = client.post("/auth/login", json={"email": email, "password": password})
+    refresh_token = login_resp.cookies[REFRESH_TOKEN_COOKIE]
+
+    logout_resp = client.post("/auth/logout")
+    assert logout_resp.status_code == 200
+
+    # Logout alone leaves the token valid -- client-side clear only; the
+    # frontend's logout() calls /auth/refresh/revoke before this.
+    resp = client.post("/auth/refresh", cookies={REFRESH_TOKEN_COOKIE: refresh_token})
+    assert resp.status_code == 200
 
 
 def test_logout_without_refresh_cookie_still_succeeds():
