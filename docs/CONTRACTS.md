@@ -520,7 +520,7 @@ Compatible with Google Authenticator, Authy, 1Password, etc.
 - On successful challenge, the attempt counter is cleared and a real 15-minute access token is issued.
 - On rate limit, the `mfa_pending` token is invalidated — even a valid TOTP code will not work until the user logs in again.
 
-## 9. Refresh tokens (v1.11)
+## 9. Refresh tokens (v1.12)
 
 Closes the PROJECT_STATUS.md §5 open item (noted as a TODO in `app/auth.py`
 since #25): access tokens are a 15-minute JWT with no renewal path, so a
@@ -611,6 +611,30 @@ DECIDED — ownership: `app/auth.py`, the `refresh_tokens` migration, and the
 MFA backend). Frontend wiring — an `api.ts` interceptor that retries once
 through `/auth/refresh` on a 401 before giving up — is a separate follow-up
 PR, same "backend contract lands, frontend follow-up after" split as §7a.
+
+DECIDED (v1.12, correcting v1.11's logout claim) — the "logout ... revokes
+the refresh token server-side" line above has never been true in a real
+browser: `_set_refresh_cookie`'s `path=/auth/refresh` means the cookie is
+never attached to a `POST /auth/logout` request, so `auth_logout`'s
+`revoke_refresh_token()` call always reads `None` and never runs (live
+repro via a real cookie jar, DECISION_LOG.md 2026-08-28). The fix is a new
+`POST /auth/refresh/revoke` endpoint (no `get_current_user` dependency,
+same pre-auth shape as `/auth/refresh`) — `path=/auth/refresh` **is**
+attached here, since it's a prefix of `/auth/refresh/revoke` and RFC 6265
+§5.1.4 matches on that (the character immediately after the cookie's path
+is `/`). This endpoint does the whole logout job in one round trip: reads
+`refresh_token`, revokes it via `revoke_refresh_token()` if present, then
+clears both cookies (the refresh cookie's `delete_cookie` call must pass
+`path=REFRESH_TOKEN_COOKIE_PATH` or the browser keeps it; `access_token`
+has the default path so it's attached and cleared here too). Unlike
+`/auth/refresh`, this endpoint is idempotent by design: a missing or
+already-revoked refresh cookie is still `200 {"status": "logged_out"}`, not
+`401` — logging out twice, or logging out with an already-expired session,
+must not error. The frontend's logout call switches to this endpoint.
+`auth_logout`'s `revoke_refresh_token()` branch — now provably unreachable
+in a real browser — is deleted rather than left in place as misleading
+dead code; whether the now-cookie-clearing-only `/auth/logout` endpoint
+itself is kept or removed is a PR-body discussion, not decided here.
 
 ### Security notes
 
@@ -705,3 +729,12 @@ PR, same "backend contract lands, frontend follow-up after" split as §7a.
   endpoint, cascade update) and the frontend retry-interceptor follow-up are
   both still open — this entry locks the shape only, same as §7/§7a's
   contract-then-implementation split. No changes to any prior section.
+- v1.12 (2026-08-28): corrects §9's v1.11 logout claim — implementing #78/#79
+  and building the frontend follow-up on top of them found that logout's
+  server-side refresh-token revocation was never reachable in a real
+  browser (`path=/auth/refresh` scoping means the cookie never attaches to
+  `POST /auth/logout`; see DECISION_LOG.md 2026-08-28). Adds a new
+  `POST /auth/refresh/revoke` endpoint (path-scoping-compatible, idempotent)
+  as the real fix and the frontend's new logout call; `auth_logout`'s dead
+  revoke branch is removed. No schema change. No changes to any other
+  section.
