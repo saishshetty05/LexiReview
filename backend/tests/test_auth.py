@@ -164,47 +164,73 @@ def test_refresh_reuse_of_rotated_token_revokes_the_whole_chain(registered_user)
     assert rotated_now_dead.json()["detail"]["category"] == "invalid_token"
 
 
-def test_refresh_revoke_endpoint_revokes_token(registered_user):
+def _cookie_jar_client() -> TestClient:
+    """TestClient over https://testserver so httpx's CookieJar actually
+    persists the Secure auth cookies — over the default http://testserver it
+    silently drops them (see test_login_cookie_is_not_secure_in_development).
+    Cookies then get attached to requests by RFC 6265 §5.1.4 path matching,
+    i.e. the browser transport the http-based client can't exercise.
+    """
+    return TestClient(app, base_url="https://testserver")
+
+
+def test_refresh_revoke_endpoint_revokes_token_via_real_cookie_jar(registered_user):
     """CONTRACTS.md §9: POST /auth/refresh/revoke is the server-side
-    revocation path the frontend calls before /auth/logout. In a real browser
-    the cookie's path=/auth/refresh scoping delivers it to
-    /auth/refresh/revoke via RFC 6265 prefix matching (/auth/refresh is a
-    prefix of /auth/refresh/revoke). Here we pass it explicitly because the
-    TestClient's cookie jar doesn't reliably deliver Secure cookies over
-    http://testserver across httpx versions.
+    revocation path the frontend calls before /auth/logout. This drives the
+    whole flow through a real cookie jar over https, so the Secure
+    refresh_token scoped to path=/auth/refresh is *delivered* to
+    /auth/refresh/revoke by the jar's RFC 6265 prefix matching — the exact
+    transport behavior the original auth_logout-revoke bug shipped under (the
+    direct-header-read tests couldn't see it). No cookies={...} is passed to
+    the revoke call; the jar must attach the cookie on its own.
     """
     _user_id, email, password = registered_user
-    login_resp = client.post("/auth/login", json={"email": email, "password": password})
+    jar = _cookie_jar_client()
+    login_resp = jar.post("/auth/login", json={"email": email, "password": password})
+    assert login_resp.status_code == 200
     refresh_token = login_resp.cookies[REFRESH_TOKEN_COOKIE]
 
-    revoke_resp = client.post(
-        "/auth/refresh/revoke",
-        cookies={REFRESH_TOKEN_COOKIE: refresh_token},
-    )
+    revoke_resp = jar.post("/auth/refresh/revoke")
     assert revoke_resp.status_code == 200
 
-    resp = client.post("/auth/refresh", cookies={REFRESH_TOKEN_COOKIE: refresh_token})
+    # The real proof: if the jar had NOT attached the cookie (e.g. a future
+    # PR moves the endpoint off /auth/refresh/*), the revoke above would have
+    # been a 200 no-op and this would still be 200, not 401.
+    resp = jar.post("/auth/refresh", cookies={REFRESH_TOKEN_COOKIE: refresh_token})
     assert resp.status_code == 401
     assert resp.json()["detail"]["category"] == "invalid_token"
 
 
-def test_logout_is_client_side_clear_and_does_not_revoke(registered_user):
+def test_logout_does_not_receive_refresh_cookie_and_does_not_revoke(registered_user):
     """POST /auth/logout is back to a pure client-side cookie clear (its
-    original stateless-JWT role). It cannot revoke server-side — the
-    refresh_token cookie's path=/auth/refresh is never attached to
-    /auth/logout by RFC 6265 prefix matching, and revocation is the revoke
-    endpoint's job. Guards the §9 split.
+    original stateless-JWT role). Even with a real cookie jar that DOES hold
+    the refresh_token, RFC 6265 never attaches it to /auth/logout (the
+    cookie's path=/auth/refresh doesn't prefix-match /auth/logout), so logout
+    can't revoke server-side — that's the revoke endpoint's job. Guards the
+    §9 split against a future widening of the cookie path silently
+    re-attaching the token here.
     """
     _user_id, email, password = registered_user
-    login_resp = client.post("/auth/login", json={"email": email, "password": password})
+    jar = _cookie_jar_client()
+    login_resp = jar.post("/auth/login", json={"email": email, "password": password})
     refresh_token = login_resp.cookies[REFRESH_TOKEN_COOKIE]
 
-    logout_resp = client.post("/auth/logout")
+    logout_resp = jar.post("/auth/logout")
     assert logout_resp.status_code == 200
 
     # Logout alone leaves the token valid -- client-side clear only; the
     # frontend's logout() calls /auth/refresh/revoke before this.
-    resp = client.post("/auth/refresh", cookies={REFRESH_TOKEN_COOKIE: refresh_token})
+    resp = jar.post("/auth/refresh", cookies={REFRESH_TOKEN_COOKIE: refresh_token})
+    assert resp.status_code == 200
+
+
+def test_refresh_revoke_with_no_cookie_is_still_200():
+    """CONTRACTS.md §9: revoke is idempotent — a missing/already-revoked
+    cookie is a 200 no-op, not a 401, so the frontend's best-effort logout
+    call can never be blocked by stale token state.
+    """
+    jar = _cookie_jar_client()
+    resp = jar.post("/auth/refresh/revoke")
     assert resp.status_code == 200
 
 
