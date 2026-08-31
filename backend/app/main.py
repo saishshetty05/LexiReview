@@ -58,7 +58,10 @@ ACCESS_TOKEN_COOKIE = "access_token"  # nosec B105 -- cookie name, not a credent
 REFRESH_TOKEN_COOKIE = "refresh_token"  # nosec B105 -- cookie name, not a credential
 # CONTRACTS.md §9 (v1.11): scoped narrower than the access-token cookie's
 # default "/" path -- the refresh token is only ever sent to the one
-# endpoint that consumes it, not attached to every request.
+# endpoint that consumes it, not attached to every request. Revocation
+# rides the *same* narrow path: /auth/refresh/revoke (below) is consumed via
+# RFC 6265 prefix matching, so the cookie attached here is still delivered
+# there without ever broadening the path to other /auth/* routes.
 REFRESH_TOKEN_COOKIE_PATH = "/auth/refresh"
 
 _SEVERITY_ORDER = {"high": 0, "medium": 1, "low": 2, "info": 3}
@@ -343,16 +346,32 @@ def auth_refresh(request: Request, response: Response) -> dict:
     return {"user_id": str(user_id)}
 
 
-@app.post("/auth/logout")
-def auth_logout(request: Request, response: Response) -> dict:
-    # Access token: client-side discard, same as before (stateless JWT).
-    # Refresh token: now also revoked server-side (CONTRACTS.md §9) --
-    # otherwise a copied refresh cookie would stay valid for
-    # REFRESH_TOKEN_TTL_DAYS after "logout," which would just move this
-    # PR's whole reason for existing one level down.
+@app.post("/auth/refresh/revoke")
+def auth_revoke_refresh_token(request: Request, response: Response) -> dict:
+    """Revoke the presented refresh token server-side, then clear both
+    cookies. No get_current_user dependency, same as POST /auth/refresh --
+    the cookie itself is the credential; it has to work once the access token
+    is gone. Its path automatically matches the narrow path=/auth/refresh
+    cookie via RFC 6265 prefix matching (/auth/refresh is a prefix of
+    /auth/refresh/revoke), so the refresh token is never attached to any other
+    /auth/* route.
+    """
     refresh_token = request.cookies.get(REFRESH_TOKEN_COOKIE)
     if refresh_token:
         revoke_refresh_token(refresh_token)
+    response.delete_cookie(ACCESS_TOKEN_COOKIE)
+    response.delete_cookie(REFRESH_TOKEN_COOKIE, path=REFRESH_TOKEN_COOKIE_PATH)
+    return {"status": "logged_out"}
+
+
+@app.post("/auth/logout")
+def auth_logout(response: Response) -> dict:
+    # Client-side cookie clear only, same as the stateless-JWT design always
+    # was. Server-side revocation of the refresh token is POST
+    # /auth/refresh/revoke, which the frontend calls before this -- the
+    # refresh_token cookie is path-scoped to /auth/refresh, so RFC 6265 never
+    # attaches it to /auth/logout, and a revoke here would always read None
+    # (DECISION_LOG 2026-08-28; CONTRACTS.md §9).
     response.delete_cookie(ACCESS_TOKEN_COOKIE)
     response.delete_cookie(REFRESH_TOKEN_COOKIE, path=REFRESH_TOKEN_COOKIE_PATH)
     return {"status": "logged_out"}

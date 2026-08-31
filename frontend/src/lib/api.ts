@@ -227,7 +227,17 @@ export function deleteAccount(): Promise<{ status: string }> {
 }
 
 export function logout(): Promise<{ status: string }> {
-  return request("/auth/logout", { method: "POST" });
+  // CONTRACTS.md §9 v1.12: /auth/refresh/revoke does the whole logout job in
+  // one round trip -- it revokes the refresh token server-side (a no-op when
+  // the cookie is already gone) and clears both cookies via delete_cookie.
+  // There is no separate /auth/logout call: the refresh_token cookie is
+  // path-scoped to /auth/refresh, so RFC 6265 never attaches it to
+  // /auth/logout anyway, and revoke already performs the client-side clear.
+  // The endpoint is idempotent (a missing/already-revoked cookie is still a
+  // 200), so a stale or missing token can never block logout -- only a
+  // genuine transport/5xx failure propagates (DECISION_LOG 2026-08-30;
+  // CONTRACTS.md §9).
+  return request("/auth/refresh/revoke", { method: "POST" });
 }
 
 export interface UploadResult {

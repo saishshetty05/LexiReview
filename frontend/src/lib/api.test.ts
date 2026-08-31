@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { ApiError, getDocumentFile, getJob, login, putFindingDecision } from "@/lib/api";
+import { ApiError, getDocumentFile, getJob, login, logout, putFindingDecision } from "@/lib/api";
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
@@ -8,6 +8,51 @@ function jsonResponse(status: number, body: unknown): Response {
     headers: { "Content-Type": "application/json" },
   });
 }
+
+describe("logout() (CONTRACTS.md §9 v1.12)", () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("makes a single round trip to /auth/refresh/revoke and returns its body", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { status: "logged_out" }));
+
+    const result = await logout();
+
+    expect(result).toEqual({ status: "logged_out" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0][0]).toBe("/auth/refresh/revoke");
+  });
+
+  it("never fires a separate /auth/logout call", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { status: "logged_out" }));
+
+    await logout();
+
+    expect(fetchMock.mock.calls.map((c) => c[0])).toEqual(["/auth/refresh/revoke"]);
+  });
+
+  it("surfaces a 5xx from the revoke endpoint as an ApiError (no silent fallback)", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(500, { detail: { category: "http_500" } }));
+
+    await expect(logout()).rejects.toBeInstanceOf(ApiError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("surfaces a network error rather than swallowing it", async () => {
+    fetchMock.mockRejectedValueOnce(new TypeError("Failed to fetch"));
+
+    await expect(logout()).rejects.toBeInstanceOf(TypeError);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe("request() refresh-retry (CONTRACTS.md §9)", () => {
   let fetchMock: ReturnType<typeof vi.fn>;
