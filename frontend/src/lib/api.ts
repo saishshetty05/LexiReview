@@ -226,21 +226,18 @@ export function deleteAccount(): Promise<{ status: string }> {
   return request("/auth/account", { method: "DELETE" });
 }
 
-export async function logout(): Promise<{ status: string }> {
-  // Revoke the refresh token server-side first. /auth/refresh/revoke is the
-  // only endpoint whose path matches the refresh_token cookie's
-  // path=/auth/refresh scope (RFC 6265 prefix matching), so it's the one call
-  // that can actually present the token for revocation. Then /auth/logout
-  // clears both cookies client-side (the stateless-JWT clear). Without this,
-  // a copied refresh cookie would stay valid for the full 30-day TTL after
-  // "logout" (CONTRACTS.md §9; DECISION_LOG 2026-08-28).
-  try {
-    await request("/auth/refresh/revoke", { method: "POST" });
-  } catch {
-    // Best-effort -- a missing/expired refresh token must not block the
-    // client-side logout from completing; revoke is a no-op in that case.
-  }
-  return request("/auth/logout", { method: "POST" });
+export function logout(): Promise<{ status: string }> {
+  // CONTRACTS.md §9 v1.12: /auth/refresh/revoke does the whole logout job in
+  // one round trip -- it revokes the refresh token server-side (a no-op when
+  // the cookie is already gone) and clears both cookies via delete_cookie.
+  // There is no separate /auth/logout call: the refresh_token cookie is
+  // path-scoped to /auth/refresh, so RFC 6265 never attaches it to
+  // /auth/logout anyway, and revoke already performs the client-side clear.
+  // The endpoint is idempotent (a missing/already-revoked cookie is still a
+  // 200), so a stale or missing token can never block logout -- only a
+  // genuine transport/5xx failure propagates (DECISION_LOG 2026-08-30;
+  // CONTRACTS.md §9).
+  return request("/auth/refresh/revoke", { method: "POST" });
 }
 
 export interface UploadResult {
