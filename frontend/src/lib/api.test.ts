@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { ApiError, getDocumentFile, getJob, login, logout, mfaChallenge, putFindingDecision } from "@/lib/api";
+import { ApiError, getDocumentFile, getJob, login, logout, putFindingDecision } from "@/lib/api";
 
 function jsonResponse(status: number, body: unknown): Response {
   return new Response(JSON.stringify(body), {
