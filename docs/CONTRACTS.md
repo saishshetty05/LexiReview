@@ -40,11 +40,13 @@ the API — owns broker delivery. The worker owns every transition after pickup.
 Nobody else writes this table. Terminal states (succeeded/failed) are never
 overwritten.
 
-**`queued` semantics (v1.13):** `queued` means the job row exists AND the outbox
-relay has delivered it to the broker, awaiting worker pickup. It does not merely
-mean "a row exists". A job whose delivery to the broker is still pending is a
-`queued` job whose outbox row is undelivered — same state, differentiated by the
-outbox row, never by the state column alone.
+**`queued` semantics (v1.13):** `queued` alone is ambiguous — it covers both
+jobs the relay has delivered to the broker (awaiting worker pickup) and jobs
+whose delivery is still pending. The state column never distinguishes the two;
+check the outbox row's `delivered_at` to tell them apart. A job whose delivery
+to the broker is still pending is a `queued` job whose outbox row is
+undelivered — same state, differentiated by the outbox row, never by the state
+column alone.
 
 ### Outbox table (v1.13)
 
@@ -789,6 +791,8 @@ itself is kept or removed is a PR-body discussion, not decided here.
   `send_task` left to fail), and a job enqueued while the broker was down is
   re-driven by the relay the moment the broker returns — no permanently
   orphaned `queued` row, and the dedup 409 path becomes self-healing too.
-  Also tightens §1's `queued` semantics (delivery-complete, pickup-pending).
+  Also tightens §1's `queued` semantics: the column alone no longer implies
+  broker delivery — the outbox row's `delivered_at` is what distinguishes
+  delivered-awaiting-pickup from still-pending jobs.
   New `outbox` table (migration 011). §5's earlier "Known, accepted gap"
   framing is removed.
