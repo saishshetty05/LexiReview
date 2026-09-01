@@ -306,13 +306,15 @@ metadata keys are present (not brittle substring matching alone):
 | Everything else (corrupted, encrypted, empty, no extractable text, context-limit exceeded) | 422 |
 
 DECIDED — success response (201): `{"doc_id", "job_id", "state": "queued"}`.
-`analysis_jobs` row is inserted `state=queued` in the same transaction as
-the `documents` row (CONTRACTS.md §1 writer rule: the API writes only the
-initial queued row); the worker is notified via a Celery `send_task` call
-by task name (`"analyze_document"`, matching `worker.py`'s registered name
-exactly — pass-by-ID only, CLAUDE.md rule 4), not by importing `app.worker`
-directly, to keep A's upload endpoint out of B's heavy LLM-client import
-chain.
+The `documents` row, the `analysis_jobs` row (`state=queued`), and a matching
+outbox row are inserted ATOMICALLY in one transaction (CONTRACTS.md §1 writer
+rule, v1.13). The request itself makes no broker call — worker notification is
+deferred to the outbox relay, which delivers the broker `send_task` by task
+name (`"analyze_document"`, matching `worker.py`'s registered name exactly —
+pass-by-ID only, CLAUDE.md rule 4), never importing `app.worker` directly, to
+keep A's upload endpoint out of B's heavy LLM-client import chain. Because no
+broker call remains in the request, upload never depends on broker
+availability at upload time (§5 v1.13).
 
 DECIDED — FR-6 dedup: one `documents.doc_version_hash` (SHA-256) match for
 the caller (RLS scopes the lookup, same anti-enumeration pattern as
@@ -328,8 +330,8 @@ the same 409 shown above.
 
 DECIDED — storage-failure rollback: `storage.put_document` is called
 *inside* the same `app_user_session` block as the `documents`/
-`analysis_jobs` inserts, before the block's implicit commit. If it raises,
-the session's own except-clause rolls the whole transaction back — no
+`analysis_jobs`/`outbox` inserts, before the block's implicit commit. If it
+raises, the session's own except-clause rolls the whole transaction back — no
 compensating `DELETE` is needed (`app_user` has no `DELETE` grant on
 `documents` by design; only `delete_account_cascade` may ever use the owner
 connection, per the 2026-07-15 decision). An orphaned `documents` row with
