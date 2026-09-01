@@ -2,7 +2,7 @@
 
 **Date:** 2026-09-01
 **Author:** Person A (Saish)
-**Status:** DRAFT — pending Person B sign-off (required per CLAUDE.md joint-contract rule)
+**Status:** APPROVED — signed by both Person A and Person B
 
 ---
 
@@ -109,5 +109,5 @@ role.
 
 ## Sign-off
 
-- [ ] Person A (Saish): Designed — _________ (date)
-- [ ] Person B (Nikhil): Approved — _________ (date)
+- [x] Person A (Saish): Designed — 2026-09-01
+- [x] Person B (Nikhil): Approved — 2026-09-01
