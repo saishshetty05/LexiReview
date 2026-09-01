@@ -91,3 +91,17 @@ def pg_app_engine():
     engine = create_engine(url, poolclass=QueuePool, pool_size=5, max_overflow=0)
     yield engine
     engine.dispose()
+
+
+@pytest.fixture(scope="session")
+def pg_relay_engine():
+    """Connects as the `relay` role (migration 011) — non-superuser,
+    non-BYPASSRLS, outbox SELECT+UPDATE only, no user-table access. Mirrors how
+    the future relay/sweeper service connects via RELAY_DATABASE_URL.
+    """
+    p = _pg_conn_params()
+    relay_password = os.environ["RELAY_USER_PASSWORD"]
+    url = f"postgresql+psycopg://relay:{relay_password}@{p['host']}:{p['port']}/{p['db']}"
+    engine = create_engine(url, poolclass=QueuePool, pool_size=5, max_overflow=0)
+    yield engine
+    engine.dispose()

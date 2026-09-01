@@ -44,6 +44,10 @@ jobs:
       # RLS-dependent tests (e.g. storage.py's anti-enumeration test) as the
       # superuser/BYPASSRLS role, bypassing RLS entirely (see DECISION_LOG.md).
       APP_DATABASE_URL: postgresql://app_user:ci_app_user_password_not_a_real_secret@localhost:5432/lexireview
+      # Needed by migration 011 (which creates the `relay` role from this
+      # password) and inherited by pytest for pg_relay_engine. Not a real
+      # secret — never used outside the ephemeral CI service container.
+      RELAY_USER_PASSWORD: ci_relay_password_not_a_real_secret
     steps:
       - uses: actions/checkout@v4
 
