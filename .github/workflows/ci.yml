@@ -38,6 +38,11 @@ jobs:
       # not a real secret, never used outside the ephemeral CI service container.
       # Distinct from POSTGRES_PASSWORD (the owner/superuser role) above.
       APP_USER_PASSWORD: ci_app_user_password_not_a_real_secret
+      # CI-only relay password for migration 011 (backend/alembic/versions);
+      # not a real secret, never used outside the ephemeral CI service container.
+      # Migration 011 creates the `relay` role from this; pytest inherits it too
+      # for the pg_relay_engine fixture (test_migration_011.py).
+      RELAY_USER_PASSWORD: ci_relay_password_not_a_real_secret
       # Must be set before "Migrate database" (which creates app_user from
       # APP_USER_PASSWORD) and is inherited by every later step including
       # pytest. Without this, db.py's owner-role fallback silently runs
