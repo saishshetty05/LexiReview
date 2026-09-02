@@ -96,11 +96,21 @@ def test_analysis_jobs_and_users_allow_update(pg_owner_engine):
     assert privileges_by_table["users"] == {"SELECT", "INSERT", "UPDATE"}
 
 
-def test_migration_002_applies_and_downgrades_cleanly(pg_owner_engine):
+def test_migration_002_applies_and_downgrades_cleanly(pg_owner_engine, pg_relay_engine):
     """Assumes the test DB starts at head (002). Downgrades to 001, checks
     document_summaries and documents.is_synthetic are both gone, then
     re-upgrades to head and checks they're both back — leaving the DB at
     head for every other test in the suite, same as it started.
+
+    Downgrading past migration 011 drops the `relay` role; re-upgrading
+    recreates it under a NEW role OID. pg_relay_engine is session-scoped
+    (conftest.py) and pools connections that authenticated under the OLD
+    OID before this test ran -- those connections' cached role identity no
+    longer matches the just-regranted privileges, so any later test reusing
+    a pooled connection sees a spurious "permission denied for table
+    outbox" (found by actually running the full suite, not just this file
+    in isolation -- test_relay.py passed alone, failed only here). Disposing
+    the pool forces every later test to authenticate fresh.
     """
 
     def _run(*args: str) -> None:
@@ -138,6 +148,7 @@ def test_migration_002_applies_and_downgrades_cleanly(pg_owner_engine):
         assert not _is_synthetic_exists()
     finally:
         _run("upgrade", "head")
+        pg_relay_engine.dispose()
 
     assert _document_summaries_exists()
     assert _is_synthetic_exists()

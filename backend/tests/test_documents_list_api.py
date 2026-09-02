@@ -13,7 +13,6 @@ from fastapi.testclient import TestClient
 from fpdf import FPDF
 from sqlalchemy import text
 
-import app.main as main_module
 from app.auth import create_access_token, register
 from app.main import ACCESS_TOKEN_COOKIE, app
 
@@ -34,18 +33,6 @@ def s3_env(monkeypatch):
     monkeypatch.setenv("S3_BUCKET", "documents-test")
     with mock_aws():
         yield
-
-
-@pytest.fixture()
-def recorded_tasks(monkeypatch):
-    """Replaces the real Celery producer's send_task with a recorder."""
-    calls: list[tuple[str, list]] = []
-
-    def fake_send_task(name, args=None, **kwargs):
-        calls.append((name, args))
-
-    monkeypatch.setattr(main_module._celery_producer, "send_task", fake_send_task)
-    return calls
 
 
 def _register_user(pg_owner_engine) -> tuple[uuid.UUID, dict[str, str]]:
@@ -92,7 +79,7 @@ def test_list_documents_empty_for_new_user(pg_owner_engine, cleanup_rows, s3_env
 
 
 def test_list_documents_returns_users_documents_ordered_by_created_at_desc(
-    pg_owner_engine, cleanup_rows, s3_env, recorded_tasks
+    pg_owner_engine, cleanup_rows, s3_env
 ):
     """Returns up to 5 documents, most recent first, with latest job info."""
     user_id, auth_cookies = _register_user(pg_owner_engine)
@@ -130,7 +117,7 @@ def test_list_documents_returns_users_documents_ordered_by_created_at_desc(
         assert doc["latest_job"]["state"] == "queued"
 
 
-def test_list_documents_limits_to_five(pg_owner_engine, cleanup_rows, s3_env, recorded_tasks):
+def test_list_documents_limits_to_five(pg_owner_engine, cleanup_rows, s3_env):
     """Only the 5 most recent documents are returned."""
     user_id, auth_cookies = _register_user(pg_owner_engine)
     cleanup_rows.append(user_id)
@@ -156,7 +143,7 @@ def test_list_documents_limits_to_five(pg_owner_engine, cleanup_rows, s3_env, re
 
 
 def test_list_documents_rls_user_cannot_see_other_users_docs(
-    pg_owner_engine, cleanup_rows, s3_env, recorded_tasks
+    pg_owner_engine, cleanup_rows, s3_env
 ):
     """RLS ensures a user only sees their own documents."""
     user_a_id, auth_a = _register_user(pg_owner_engine)
@@ -202,7 +189,7 @@ def test_list_documents_requires_auth():
 
 
 def test_list_documents_includes_job_state(
-    pg_owner_engine, cleanup_rows, s3_env, recorded_tasks
+    pg_owner_engine, cleanup_rows, s3_env
 ):
     """The latest_job includes state, created_at, and finished_at."""
     user_id, auth_cookies = _register_user(pg_owner_engine)

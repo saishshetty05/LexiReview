@@ -3,11 +3,13 @@
 Runs against real Postgres (RLS matters -- documents/analysis_jobs rows must
 be scoped to the uploading user) plus either real compose MinIO
 (S3_ENDPOINT set) or moto (S3_ENDPOINT unset, e.g. CI) -- same s3_env
-pattern as test_storage.py. The Celery producer call (app.main._enqueue_analysis)
-is monkeypatched to a recorder rather than hitting a real broker: these are
-API/DB/storage tests, not a Celery integration test, and asserting the
-recorded (task name, args) is what actually catches a silently-wrong task
-name (the exact risk flagged in PR review), not just "it didn't raise."
+pattern as test_storage.py. Upload no longer makes a broker call at all
+(CONTRACTS.md §1/§5, v1.13): it writes an `outbox` row atomically with
+documents/analysis_jobs, and app/relay.py delivers it later. These are
+API/DB/storage tests, not a Celery integration test, so `recorded_tasks`
+reads the outbox row(s) back and asserts their (task_name, args) payload
+directly -- catching a silently-wrong task name/args (the exact risk flagged
+in PR review), not just "it didn't raise."
 """
 from __future__ import annotations
 
@@ -46,19 +48,18 @@ def s3_env(monkeypatch):
 
 
 @pytest.fixture()
-def recorded_tasks(monkeypatch):
-    """Replaces the real Celery producer's send_task with a recorder, so
-    tests assert the exact (task name, args) sent -- catching a silently
-    wrong task name, which would otherwise leave jobs queued forever with
-    no error surface.
+def recorded_tasks(pg_owner_engine):
+    """Reads back the outbox row(s) `upload_document` wrote, in creation
+    order, as (task_name, args) tuples -- same shape the old Celery-producer
+    monkeypatch recorded, so existing assertions didn't need to change shape,
+    only how they're populated.
     """
-    calls: list[tuple[str, list]] = []
+    def _read() -> list[tuple[str, list]]:
+        with pg_owner_engine.connect() as conn:
+            rows = conn.execute(text("SELECT payload_json FROM outbox ORDER BY created_at")).fetchall()
+        return [(row.payload_json["task_name"], row.payload_json["args"]) for row in rows]
 
-    def fake_send_task(name, args=None, **kwargs):
-        calls.append((name, args))
-
-    monkeypatch.setattr(main_module._celery_producer, "send_task", fake_send_task)
-    return calls
+    return _read
 
 
 def _register_user(pg_owner_engine) -> tuple[uuid.UUID, dict[str, str]]:
@@ -137,7 +138,7 @@ def test_upload_happy_path_creates_document_and_queued_job(
     # The Celery task name is verified explicitly, not assumed -- worker.py
     # registers it as "analyze_document" (short name override), not the
     # dotted default "app.worker.analyze_document".
-    assert recorded_tasks == [("analyze_document", [str(doc_id), str(user_id)])]
+    assert recorded_tasks() == [("analyze_document", [str(doc_id), str(user_id)])]
 
 
 def test_upload_preflight_rejection_writes_nothing(pg_owner_engine, cleanup_rows, s3_env, recorded_tasks):
@@ -163,7 +164,7 @@ def test_upload_preflight_rejection_writes_nothing(pg_owner_engine, cleanup_rows
         ).scalar_one()
     assert doc_count == 0
     assert job_count == 0
-    assert recorded_tasks == []
+    assert recorded_tasks() == []
 
 
 def test_upload_duplicate_sha256_returns_409_with_existing_doc_id(
@@ -201,7 +202,7 @@ def test_upload_duplicate_sha256_returns_409_with_existing_doc_id(
     assert doc_count == 1  # the duplicate upload did not create a second row
 
     # Only the first upload enqueued a task.
-    assert recorded_tasks == [("analyze_document", [existing_doc_id, str(user_id)])]
+    assert recorded_tasks() == [("analyze_document", [existing_doc_id, str(user_id)])]
 
 
 def test_upload_concurrent_duplicate_uploads_create_exactly_one_document(
@@ -259,7 +260,7 @@ def test_upload_requires_auth(s3_env, recorded_tasks):
         files={"file": ("lease.pdf", io.BytesIO(_valid_pdf_bytes()), "application/pdf")},
     )
     assert resp.status_code == 401
-    assert recorded_tasks == []
+    assert recorded_tasks() == []
 
 
 def test_upload_storage_failure_rolls_back_document_row(
@@ -297,27 +298,22 @@ def test_upload_storage_failure_rolls_back_document_row(
         ).scalar_one()
     assert doc_count == 0
     assert job_count == 0
-    assert recorded_tasks == []
+    assert recorded_tasks() == []
 
 
-def test_upload_broker_failure_returns_502_and_leaves_job_queued(
-    pg_owner_engine, cleanup_rows, s3_env, monkeypatch
+def test_upload_makes_no_broker_call_and_leaves_outbox_for_relay(
+    pg_owner_engine, cleanup_rows, s3_env, recorded_tasks
 ):
-    """Unlike the storage-failure case above, _enqueue_analysis runs after
-    the documents/analysis_jobs transaction has already committed -- there
-    is nothing left to roll back into. CONTRACTS.md §5: 502, doc_id/job_id
-    returned so the caller isn't left with nothing, and the job is left
-    `queued` rather than marked failed (jobs.py's mark_failed only allows
-    running->failed, per CONTRACTS.md §1 -- there's no queued->failed arrow
-    to use here, a documented, accepted gap for this version).
+    """CONTRACTS.md §1/§5 (v1.13): upload makes no broker call at all, so a
+    broker outage at upload time can no longer surface as a request failure
+    -- delivery is entirely deferred to app/relay.py's sweep, which reads
+    this same outbox row. This replaces the old
+    test_upload_broker_failure_returns_502_and_leaves_job_queued, whose 502
+    broker_failure response CONTRACTS.md v1.13 explicitly retires (there is
+    no broker call left in the request to fail).
     """
     user_id, auth_cookies = _register_user(pg_owner_engine)
     cleanup_rows.append(user_id)
-
-    def failing_send_task(*args, **kwargs):
-        raise ConnectionError("simulated broker outage")
-
-    monkeypatch.setattr(main_module._celery_producer, "send_task", failing_send_task)
 
     resp = client.post(
         "/documents/upload",
@@ -325,18 +321,23 @@ def test_upload_broker_failure_returns_502_and_leaves_job_queued(
         files={"file": ("lease.pdf", io.BytesIO(_valid_pdf_bytes()), "application/pdf")},
     )
 
-    assert resp.status_code == 502
-    detail = resp.json()["detail"]
-    assert detail["category"] == "broker_failure"
-    assert "doc_id" in detail and "job_id" in detail
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    doc_id, job_id = body["doc_id"], body["job_id"]
 
     with pg_owner_engine.connect() as conn:
-        doc_row = conn.execute(
-            text("SELECT id FROM documents WHERE doc_id = :id"), {"id": detail["doc_id"]}
-        ).fetchone()
         job_row = conn.execute(
-            text("SELECT state FROM analysis_jobs WHERE id = :id"), {"id": detail["job_id"]}
+            text("SELECT state FROM analysis_jobs WHERE id = :id"), {"id": job_id}
         ).fetchone()
-    assert doc_row is not None
+        outbox_row = conn.execute(
+            text("SELECT delivered_at, attempts FROM outbox WHERE job_id = :id"), {"id": job_id}
+        ).fetchone()
     assert job_row is not None
     assert job_row.state == "queued"
+    # The row is durably queued for delivery regardless of broker reachability
+    # -- delivery status lives on the outbox row, never the job's own state
+    # column (CONTRACTS.md §1's tightened `queued` semantics, v1.13).
+    assert outbox_row is not None
+    assert outbox_row.delivered_at is None
+    assert outbox_row.attempts == 0
+    assert recorded_tasks() == [("analyze_document", [doc_id, str(user_id)])]

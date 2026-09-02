@@ -41,10 +41,25 @@ celery_app = Celery("lexireview", broker=os.environ.get("REDIS_URL", "redis://re
                     backend=os.environ.get("REDIS_URL", "redis://redis:6379/0"))
 celery_app.conf.broker_connection_retry_on_startup = True
 
+# Outbox relay sweep (CONTRACTS.md §1/§5, v1.13) -- run by the `relay`
+# service's `celery beat` process, defined in docker-compose.yml. The sweep
+# itself lives in app/relay.py, imported lazily there to avoid a circular
+# import (relay.sweep_outbox needs celery_app, defined in this module).
+celery_app.conf.beat_schedule = {
+    "sweep-outbox": {"task": "relay.sweep_outbox", "schedule": 10.0},
+}
+
 
 @celery_app.task(name="ping")
 def ping() -> str:
     return "pong"
+
+
+@celery_app.task(name="relay.sweep_outbox")
+def relay_sweep_outbox() -> None:
+    from app.relay import sweep_outbox
+
+    sweep_outbox()
 
 
 def _execute_analysis(job: AnalysisJob) -> list[dict]:
