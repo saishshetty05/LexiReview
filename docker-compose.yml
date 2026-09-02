@@ -73,6 +73,30 @@ services:
     env_file: .env
     environment:
       APP_DATABASE_URL: postgresql://app_user:${APP_USER_PASSWORD}@postgres:5432/${POSTGRES_DB:-lexireview}
+      # relay.sweep_outbox (CONTRACTS.md §1/§5, v1.13) executes here, not in
+      # the `relay` container below -- `celery beat` only schedules the task
+      # by name; whichever worker consumes the queue runs its body. So the
+      # relay role's connection string has to live wherever the task body
+      # actually runs, not next to the beat process that merely ticks it.
+      RELAY_DATABASE_URL: postgresql://relay:${RELAY_USER_PASSWORD}@postgres:5432/${POSTGRES_DB:-lexireview}
+    volumes:
+      - ./backend:/code
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  relay:
+    build: ./backend
+    # Outbox sweep (CONTRACTS.md §1/§5, v1.13): this process only ticks the
+    # periodic task registered in app/worker.py's beat_schedule on a timer --
+    # the task body (app/relay.py) actually executes in the `worker`
+    # container above, which is why RELAY_DATABASE_URL is set there instead.
+    command: celery -A app.worker.celery_app beat --loglevel=info
+    env_file: .env
+    environment:
+      APP_DATABASE_URL: postgresql://app_user:${APP_USER_PASSWORD}@postgres:5432/${POSTGRES_DB:-lexireview}
     volumes:
       - ./backend:/code
     depends_on:

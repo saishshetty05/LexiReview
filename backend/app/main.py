@@ -11,7 +11,6 @@ import tempfile
 import uuid
 from typing import Iterator, Literal
 
-from celery import Celery
 from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
 from pydantic import BaseModel
 from sqlalchemy import select, text
@@ -42,7 +41,7 @@ from app.mfa_redis import check_and_increment_challenge_attempt, clear_challenge
 from app.db import app_user_session
 from app.decisions import UNSET, get_decisions_for_findings, upsert_decision
 from app.jobs import create_queued_job
-from app.models import AnalysisJob, AnalysisResult, Document, DocumentSummary, User
+from app.models import AnalysisJob, AnalysisResult, Document, DocumentSummary, Outbox, User
 from app.preflight import PreflightResult, run_preflight
 from app.storage import (
     DocumentNotFoundError,
@@ -687,25 +686,6 @@ def get_document_file(
     return Response(content=contents, media_type=content_type)
 
 
-# Producer-only Celery client: sends tasks by name without importing
-# app.worker, which pulls in anthropic/llm_client/analysis_pipeline -- B's
-# whole heavy dependency chain -- into A's upload endpoint. This is the
-# standard Celery producer-side pattern; the task's *implementation* isn't
-# needed to enqueue it, only the app's broker config.
-_celery_producer = Celery(
-    "lexireview-producer", broker=os.environ.get("REDIS_URL", "redis://redis:6379/0")
-)
-
-
-def _enqueue_analysis(doc_id: uuid.UUID, user_id: uuid.UUID) -> None:
-    # Task name verified against worker.py's @celery_app.task(bind=True,
-    # name="analyze_document") decorator -- it explicitly overrides the
-    # default dotted-path name, so "analyze_document" (not
-    # "app.worker.analyze_document") is correct. Pass-by-ID only (CLAUDE.md
-    # rule 4): no document content crosses the queue.
-    _celery_producer.send_task("analyze_document", args=[str(doc_id), str(user_id)])
-
-
 def _preflight_status_code(result: PreflightResult) -> int:
     # preflight.py returns a free-text reason + a metadata dict, not a
     # status-code enum -- map by which metadata keys are present, not by
@@ -728,6 +708,13 @@ def upload_document(
 ) -> dict:
     """FR-6 / CLAUDE.md rule 8: preflight passes BEFORE any storage or DB
     write happens -- nothing below the preflight call executes on rejection.
+
+    Broker-enqueue (CONTRACTS.md §1/§5, v1.13): the documents/analysis_jobs/
+    outbox rows are all written atomically in the same app_user_session
+    transaction below. This request makes no broker call at all -- delivery
+    is deferred to the outbox relay (app/relay.py), so upload can never fail
+    with a broker_failure 502; a broker outage just means delivery is
+    delayed, not lost.
 
     Storage-failure handling: storage.put_document() is called INSIDE the
     same app_user_session block as the documents/analysis_jobs inserts, one
@@ -875,29 +862,16 @@ def upload_document(
                 },
             ) from exc
 
-    try:
-        _enqueue_analysis(doc_id, user.id)
-    except Exception as exc:
-        # The documents/analysis_jobs rows are already committed (the
-        # app_user_session block above already exited) -- unlike
-        # put_document's failure, there is no transaction left to roll this
-        # back into. The job is deliberately left `queued` rather than
-        # marked failed: jobs.py's mark_failed only allows a running->failed
-        # transition (CONTRACTS.md §1's state machine has no queued->failed
-        # arrow), and adding one isn't a call to make under time pressure
-        # without a contract sign-off. Known, accepted gap for this PR, same
-        # as the dedup race above -- the row stays queued (a manual re-drive
-        # would need a follow-up, tracked in CONTRACTS.md §5) rather than
-        # silently losing the failure, and the caller gets an immediate,
-        # structured signal instead of a generic 500.
-        raise HTTPException(
-            status_code=502,
-            detail={
-                "category": "broker_failure",
-                "message": "Document was stored but analysis could not be queued. Please try again.",
-                "doc_id": str(doc_id),
-                "job_id": str(job_id),
-            },
-        ) from exc
+        # Atomic with the rows above (CONTRACTS.md §1/§5, v1.13): the API
+        # makes no broker call itself. Task name verified against worker.py's
+        # @celery_app.task(bind=True, name="analyze_document") decorator --
+        # it explicitly overrides the default dotted-path name. Pass-by-ID
+        # only (CLAUDE.md rule 4): no document content crosses the queue.
+        session.add(
+            Outbox(
+                job_id=job_id,
+                payload_json={"task_name": "analyze_document", "args": [str(doc_id), str(user.id)]},
+            )
+        )
 
     return {"doc_id": str(doc_id), "job_id": str(job_id), "state": "queued"}

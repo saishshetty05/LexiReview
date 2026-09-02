@@ -203,3 +203,25 @@ class AnalysisJob(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class Outbox(Base):
+    """Transactional outbox for broker delivery, per CONTRACTS.md §1/§5 (v1.13).
+
+    One row per analysis job, written atomically with its `analysis_jobs` row
+    by `upload_document`. The relay (app/relay.py), not the API, owns broker
+    delivery -- see migration 011 for the RLS/grants model (no RLS; app_user
+    INSERT-only, relay SELECT+UPDATE-only).
+    """
+
+    __tablename__ = "outbox"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    job_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("analysis_jobs.id"), nullable=False, unique=True)
+    # Opaque to the API (CONTRACTS.md §1) -- {"task_name": ..., "args": [...]},
+    # an agreement purely between this writer and app/relay.py's reader.
+    payload_json: Mapped[dict] = mapped_column(JSON().with_variant(JSONB(), "postgresql"), nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
