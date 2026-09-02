@@ -90,18 +90,17 @@ services:
   relay:
     build: ./backend
     # Outbox sweep (CONTRACTS.md §1/§5, v1.13): this process only ticks the
-    # periodic task registered in app/worker.py's beat_schedule on a timer --
-    # the task body (app/relay.py) actually executes in the `worker`
-    # container above, which is why RELAY_DATABASE_URL is set there instead.
-    command: celery -A app.worker.celery_app beat --loglevel=info
+    # clock and sends "relay.sweep_outbox" by name -- app.beat is a minimal
+    # Celery app that never imports worker.py's heavy LLM/analysis chain or
+    # app.db, so no APP_DATABASE_URL/RELAY_DATABASE_URL is needed here. The
+    # task body actually executes in the `worker` container above, which is
+    # why those are set there instead.
+    command: celery -A app.beat.beat_app beat --loglevel=info
     env_file: .env
-    environment:
-      APP_DATABASE_URL: postgresql://app_user:${APP_USER_PASSWORD}@postgres:5432/${POSTGRES_DB:-lexireview}
     volumes:
       - ./backend:/code
     depends_on:
-      postgres:
-        condition: service_healthy
+      # Only the broker -- app.beat never touches Postgres.
       redis:
         condition: service_healthy
 

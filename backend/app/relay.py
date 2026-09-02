@@ -3,14 +3,21 @@
 `upload_document` (app/main.py) writes the job row and its outbox row
 atomically and makes no broker call itself. This module is the other side:
 it sweeps undelivered outbox rows and hands them to the broker, retrying
-with backoff up to a fixed attempt budget. Wired into Celery beat by
-worker.py (a satellite process like the worker, so importing worker.py's
-heavy LLM/analysis chain here is fine -- unlike in main.py's API process).
+with backoff up to a fixed attempt budget, and dead-lettering a row once
+its budget is exhausted.
+
+The task this module implements (relay.sweep_outbox) is scheduled by
+app/beat.py's minimal Celery app (the `relay` docker-compose service, which
+only ticks the clock) but actually executes inside app/worker.py's process
+(the `worker` service) -- so importing worker.py's heavy LLM/analysis chain
+here is fine, unlike in main.py's API process.
 
 Runs as the dedicated `relay` Postgres role (migration 011): SELECT+UPDATE
 on `outbox` only, no RLS, no access to any user table -- see
 docs/MIGRATION_011_RLS_DECISION.md. This module must never import
-app_user_session or attempt to touch a user-owned table.
+app_user_session or attempt to touch a user-owned table; doc_id/user_id for
+dead-lettering come from the outbox row's own payload_json, never a fresh
+analysis_jobs lookup.
 """
 from __future__ import annotations
 
@@ -68,20 +75,23 @@ def sweep_outbox(*, engine: Engine | None = None, max_attempts: int = MAX_DELIVE
 
     FOR UPDATE SKIP LOCKED is cheap insurance against a future second relay
     instance double-sending -- only one is deployed today, but the query
-    stays correct if that ever changes. Rows at max_attempts are left alone:
-    the relay role has no grant on analysis_jobs, so it cannot resolve
-    doc_id/user_id to route them through worker.py's dead_letter.record --
-    forcing that would mean widening the relay's grants past outbox alone,
-    undermining the least-privilege design locked in by migration 011. A
-    stuck row is visible to an operator via:
-        SELECT * FROM outbox WHERE delivered_at IS NULL AND attempts >= 5;
+    stays correct if that ever changes.
+
+    A row whose delivery fails on what was its last allowed attempt is
+    dead-lettered immediately, via worker.py's existing dead_letter.record
+    sink -- using doc_id/user_id straight out of the row's own payload_json,
+    never a fresh analysis_jobs lookup, so this needs no grant beyond the
+    relay role's existing SELECT+UPDATE on outbox alone (migration 011's
+    least-privilege design is unaffected). The WHERE clause's
+    `attempts < max_attempts` then permanently excludes the row from every
+    future sweep, so this fires exactly once per row, at the transition.
 
     `engine` defaults to the module's own RELAY_DATABASE_URL-backed engine;
     tests pass conftest.py's `pg_relay_engine` fixture instead.
     """
     # Imported lazily: app.worker pulls in anthropic/llm_client/analysis_pipeline,
     # which only the worker/relay processes should ever load, never the API.
-    from app.worker import celery_app
+    from app.worker import celery_app, dead_letter_record
 
     engine = engine or _default_relay_engine()
     with engine.begin() as conn:
@@ -98,11 +108,12 @@ def sweep_outbox(*, engine: Engine | None = None, max_attempts: int = MAX_DELIVE
             if not _is_due(row.last_attempt_at, row.attempts):
                 continue
 
+            payload = row.payload_json
             try:
-                payload = row.payload_json
                 celery_app.send_task(payload["task_name"], args=payload["args"])
             except Exception:
                 logger.warning("outbox delivery attempt failed for job_id=%s", row.job_id, exc_info=True)
+                new_attempts = row.attempts + 1
                 conn.execute(
                     text(
                         "UPDATE outbox SET attempts = attempts + 1, last_attempt_at = now() "
@@ -110,6 +121,17 @@ def sweep_outbox(*, engine: Engine | None = None, max_attempts: int = MAX_DELIVE
                     ),
                     {"id": row.id},
                 )
+                if new_attempts >= max_attempts:
+                    doc_id, user_id = payload["args"]
+                    dead_letter_record.apply_async(
+                        kwargs={
+                            "job_id": str(row.job_id),
+                            "doc_id": doc_id,
+                            "user_id": user_id,
+                            "error_reason": "outbox_delivery_exhausted",
+                        },
+                        queue="dead_letter",
+                    )
                 continue
 
             conn.execute(

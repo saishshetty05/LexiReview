@@ -7,6 +7,7 @@ from celery import Celery
 from sqlalchemy import select
 
 from app.analysis_pipeline import run_analysis, run_summary
+from app.beat_schedule import BEAT_SCHEDULE
 from app.db import app_user_session
 from app.decisions import get_severity_examples
 from app.jobs import (
@@ -41,13 +42,14 @@ celery_app = Celery("lexireview", broker=os.environ.get("REDIS_URL", "redis://re
                     backend=os.environ.get("REDIS_URL", "redis://redis:6379/0"))
 celery_app.conf.broker_connection_retry_on_startup = True
 
-# Outbox relay sweep (CONTRACTS.md §1/§5, v1.13) -- run by the `relay`
-# service's `celery beat` process, defined in docker-compose.yml. The sweep
-# itself lives in app/relay.py, imported lazily there to avoid a circular
-# import (relay.sweep_outbox needs celery_app, defined in this module).
-celery_app.conf.beat_schedule = {
-    "sweep-outbox": {"task": "relay.sweep_outbox", "schedule": 10.0},
-}
+# Outbox relay sweep (CONTRACTS.md §1/§5, v1.13): the `relay` service's
+# `celery beat` process (app/beat.py, a separate minimal Celery app) ticks
+# this same schedule and sends "relay.sweep_outbox" by name; this worker
+# process is what actually consumes it and runs the task below. Registered
+# here too (not just on beat_app) so `celery -A app.worker.celery_app worker`
+# alone -- e.g. in a dev shell without the `relay` service running -- can
+# still execute a sweep if something else triggers it.
+celery_app.conf.beat_schedule = BEAT_SCHEDULE
 
 
 @celery_app.task(name="ping")
