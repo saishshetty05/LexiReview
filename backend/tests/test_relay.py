@@ -105,6 +105,14 @@ def _outbox_row(pg_owner_engine, job_id):
         ).fetchone()
 
 
+def _payload_args(pg_owner_engine, job_id) -> tuple[str, str]:
+    with pg_owner_engine.connect() as conn:
+        payload = conn.execute(
+            text("SELECT payload_json FROM outbox WHERE job_id = :id"), {"id": job_id}
+        ).scalar_one()
+    return tuple(payload["args"])
+
+
 def test_sweep_delivers_undelivered_row(
     pg_owner_engine, pg_relay_engine, seed_outbox_row, recorded_send_task
 ):
@@ -179,3 +187,70 @@ def test_sweep_skips_row_at_max_attempts(
     row = _outbox_row(pg_owner_engine, job_id)
     assert row.attempts == 5
     assert row.delivered_at is None
+
+
+def test_sweep_dead_letters_row_exhausted_on_this_attempt(
+    pg_owner_engine, pg_relay_engine, seed_outbox_row, monkeypatch
+):
+    """A row failing its LAST allowed attempt (attempts 4 -> 5, max=5) is
+    dead-lettered immediately, using doc_id/user_id straight out of the
+    row's own payload_json -- never a fresh analysis_jobs lookup, so this
+    needs no grant beyond the relay role's existing SELECT+UPDATE on outbox.
+    """
+    def failing_send_task(*args, **kwargs):
+        raise ConnectionError("simulated broker outage")
+
+    monkeypatch.setattr(worker_module.celery_app, "send_task", failing_send_task)
+
+    dead_letter_calls = []
+    monkeypatch.setattr(
+        worker_module.dead_letter_record,
+        "apply_async",
+        lambda kwargs, queue: dead_letter_calls.append((kwargs, queue)),
+    )
+
+    stale = datetime.now(timezone.utc) - timedelta(days=1)
+    job_id = seed_outbox_row(attempts=4, last_attempt_at=stale)
+    doc_id, user_id = _payload_args(pg_owner_engine, job_id)
+
+    sweep_outbox(engine=pg_relay_engine, max_attempts=5)
+
+    row = _outbox_row(pg_owner_engine, job_id)
+    assert row.attempts == 5
+    assert row.delivered_at is None
+
+    assert len(dead_letter_calls) == 1
+    kwargs, queue = dead_letter_calls[0]
+    assert queue == "dead_letter"
+    assert kwargs == {
+        "job_id": str(job_id),
+        "doc_id": doc_id,
+        "user_id": user_id,
+        "error_reason": "outbox_delivery_exhausted",
+    }
+
+
+def test_sweep_does_not_dead_letter_before_budget_exhausted(
+    pg_owner_engine, pg_relay_engine, seed_outbox_row, monkeypatch
+):
+    """A failed attempt that still leaves attempts < max_attempts must not
+    dead-letter -- only the transition onto the budget's last attempt does.
+    """
+    def failing_send_task(*args, **kwargs):
+        raise ConnectionError("simulated broker outage")
+
+    monkeypatch.setattr(worker_module.celery_app, "send_task", failing_send_task)
+
+    dead_letter_calls = []
+    monkeypatch.setattr(
+        worker_module.dead_letter_record,
+        "apply_async",
+        lambda kwargs, queue: dead_letter_calls.append((kwargs, queue)),
+    )
+
+    stale = datetime.now(timezone.utc) - timedelta(days=1)
+    seed_outbox_row(attempts=2, last_attempt_at=stale)
+
+    sweep_outbox(engine=pg_relay_engine, max_attempts=5)
+
+    assert dead_letter_calls == []
