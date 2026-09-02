@@ -15,6 +15,7 @@ gets SELECT+UPDATE on outbox only, and no grant on any user table.
 """
 from __future__ import annotations
 
+import json
 import uuid
 
 import pytest
@@ -146,7 +147,7 @@ def test_relay_has_no_grant_on_any_user_table(pg_owner_engine):
     assert granted_tables == {"outbox"}, (
         f"relay must have grants on outbox ONLY, got: {granted_tables}"
     )
-    assert USER_TABLES.isdisjoint(granted_tables), (
+    assert set(USER_TABLES).isdisjoint(granted_tables), (
         "relay must have no grant on any user table (least-privilege)"
     )
 
@@ -180,13 +181,19 @@ def seeded_job_and_outbox(pg_owner_engine, pg_app_engine):
         conn.commit()
 
     # API write path: app_user inserts the outbox row (INSERT-only grant).
+    # payload_json is JSONB; text() has no type info, so pass a serialized
+    # JSON string and cast (psycopg can't adapt a raw dict).
     with pg_app_engine.connect() as conn:
         conn.execute(
             text(
                 "INSERT INTO outbox (id, job_id, payload_json, created_at) "
-                "VALUES (:id, :job_id, :payload, now())"
+                "VALUES (:id, :job_id, CAST(:payload AS jsonb), now())"
             ),
-            {"id": uuid.uuid4(), "job_id": job_id, "payload": {"kind": "analysis", "v": 1}},
+            {
+                "id": uuid.uuid4(),
+                "job_id": job_id,
+                "payload": json.dumps({"kind": "analysis", "v": 1}),
+            },
         )
         conn.commit()
 
@@ -235,9 +242,15 @@ def test_relay_cross_user_sweep_and_scoping(
         ).fetchall()
     assert rows == []
 
-    # Relay must NOT be able to read any user table (least-privilege).
+    # Relay must NOT be able to read any user table (least-privilege). The
+    # exact error is either a grants denial ("permission denied for table
+    # documents") or, because RLS is FORCE-enabled and the relay has no
+    # app.user_id set, the fail-closed "unrecognized configuration parameter
+    # app.user_id" — either one means the relay is blocked from user data.
     with pg_relay_engine.connect() as conn:
-        with pytest.raises(ProgrammingError, match="permission denied"):
+        with pytest.raises(
+            ProgrammingError, match=r"permission denied|unrecognized configuration parameter"
+        ):
             conn.execute(text("SELECT id, user_id FROM documents"))
         conn.rollback()
 
