@@ -108,7 +108,7 @@ _ADMIN_LIST_USERS = sa.text(
 CREATE OR REPLACE FUNCTION admin_list_users()
 RETURNS TABLE(
     id UUID,
-    email TEXT,
+    email VARCHAR,
     is_admin BOOLEAN,
     active BOOLEAN,
     created_at TIMESTAMPTZ
