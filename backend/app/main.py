@@ -41,7 +41,7 @@ from app.mfa_redis import check_and_increment_challenge_attempt, clear_challenge
 from app.db import app_user_session
 from app.decisions import UNSET, get_decisions_for_findings, upsert_decision
 from app.jobs import create_queued_job
-from app.models import AnalysisJob, AnalysisResult, Document, DocumentSummary, Outbox, User
+from app.models import AnalysisJob, AnalysisResult, AuditLog, Document, DocumentSummary, Outbox, User
 from app.preflight import PreflightResult, run_preflight
 from app.storage import (
     DocumentNotFoundError,
@@ -419,6 +419,112 @@ def auth_delete_account(
     response.delete_cookie(ACCESS_TOKEN_COOKIE)
     response.delete_cookie(REFRESH_TOKEN_COOKIE, path=REFRESH_TOKEN_COOKIE_PATH)
     return {"status": "deleted"}
+
+
+# ── Admin endpoints (PR #3 of 3) ─────────────────────────────────────────
+# CONTRACTS.md §10: /admin/users — user management, metadata only (never
+# document content). Both endpoints are gated by require_admin, which chains
+# on get_current_user (auth + non-suspended + is_admin, each re-checked fresh
+# from the DB every request — no JWT admin claim, so a suspension or demotion
+# takes effect on the admin's very next request).
+#
+# The cross-user access these endpoints need is provided by the SECURITY
+# DEFINER functions from migration 013, not by a second RLS policy: the bypass
+# lives inside the DB function, which re-verifies the caller's is_admin itself,
+# so admin scope is enforced at the database even if the app layer ever made a
+# mistake (PR #2 review rationale).
+
+
+class AdminSetUserActiveRequest(BaseModel):
+    active: bool
+
+
+def _admin_set_user_active_exception(exc: Exception) -> HTTPException | None:
+    """Map the plpgsql errors raised by admin_set_user_active() (migration
+    013) to HTTP responses. The function fails closed by design — the access
+    bypass and the authz check both live inside the DB — so a caller reaching
+    one of these through the endpoint would mean the app layer and the DB
+    disagreed about the admin's privileges (defensive; require_admin makes
+    them impossible in the normal path). Anything unmapped propagates loudly
+    rather than being masked as a generic error.
+    """
+    diag = getattr(getattr(exc, "orig", None), "diag", None)
+    sqlstate = getattr(diag, "sqlstate", None)
+    # P0002 is PostgreSQL's PL/pgSQL-class no_data_found (what RAISE
+    # ... USING ERRCODE='no_data_found' actually yields) — NOT the 02-class
+    # 02000; the migration's function raises the former. Found by running the
+    # endpoint against the real function during PR #3 development.
+    if sqlstate == "P0002":  # no_data_found — target user does not exist
+        return HTTPException(status_code=404, detail={"category": "user_not_found"})
+    if sqlstate == "23514":  # check_violation — admin tried to suspend self
+        return HTTPException(status_code=400, detail={"category": "cannot_self_suspend"})
+    return None
+
+
+@app.get("/admin/users")
+def admin_list_users_endpoint(
+    current: tuple[User, Session] = Depends(require_admin),
+) -> list[dict]:
+    """CONTRACTS.md §10: list all users (metadata only), in created_at order.
+    Calls the SECURITY DEFINER admin_list_users() (migration 013), which
+    returns ONLY the safe columns (id, email, is_admin, active, created_at) —
+    password_hash and mfa_secret never leave the DB (the safe-columns fix from
+    PR #2 review lives in the function, so this endpoint can't leak them no
+    matter how it serializes the rows).
+    """
+    _admin, session = current
+    rows = session.execute(text("SELECT * FROM admin_list_users()")).mappings().all()
+    return [
+        {
+            "user_id": str(row["id"]),
+            "email": row["email"],
+            "is_admin": row["is_admin"],
+            "active": row["active"],
+            "created_at": row["created_at"].isoformat(),
+        }
+        for row in rows
+    ]
+
+
+@app.patch("/admin/users/{user_id}")
+def admin_set_user_active_endpoint(
+    user_id: uuid.UUID,
+    body: AdminSetUserActiveRequest,
+    current: tuple[User, Session] = Depends(require_admin),
+) -> dict:
+    """CONTRACTS.md §10: suspend (active=False) or reactivate (active=True) a
+    target user. Delegates to the SECURITY DEFINER admin_set_user_active()
+    (migration 013), which refuses self-suspension and unknown targets inside
+    the DB.
+
+    No token revocation is needed here: get_current_user (which require_admin
+    chains on) loads the target's User row fresh from the DB on every request,
+    so the very next request a suspended user makes is rejected with 403
+    account_suspended — active=FALSE takes effect immediately and cannot be
+    papered over by a cached JWT.
+    """
+    admin, session = current
+    try:
+        session.execute(
+            text("SELECT admin_set_user_active(:target, :active)"),
+            {"target": user_id, "active": body.active},
+        )
+    except Exception as exc:
+        mapped = _admin_set_user_active_exception(exc)
+        if mapped is not None:
+            raise mapped from exc
+        raise
+    # Audit (CLAUDE.md rule 2): metadata only — event_type + acting admin +
+    # target. audit_log's FORCE RLS (user_id = app.user_id) passes because the
+    # acting user IS app.user_id; target_user_id rides the migration-012 column.
+    session.add(
+        AuditLog(
+            event_type="user_suspended" if not body.active else "user_reactivated",
+            user_id=admin.id,
+            target_user_id=user_id,
+        )
+    )
+    return {"user_id": str(user_id), "active": body.active}
 
 
 def _parse_error_reason(error_reason: str) -> dict:

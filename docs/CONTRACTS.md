@@ -694,6 +694,108 @@ itself is kept or removed is a PR-body discussion, not decided here.
   indefinitely via rotation. An inactive session's token still expires
   after 30 days.
 
+## 10. Admin user management (v1.14)
+
+Admin role delivered across three PRs (resumed 2026-08-12): migration 012
+(pure schema: `users.is_admin`, `users.active`, `audit_log.target_user_id`),
+migration 013 (SECURITY DEFINER functions + enforcement in
+`get_current_user`/`require_admin`), and this section for the `/admin/users`
+endpoints. Admin scope is **user management only** — list accounts and
+suspend/reactivate them. It deliberately does not surface document content;
+the existing user-scoped read/write paths (§2/§3/§4/§7) are untouched.
+
+### Admin identity
+
+DECIDED — a user is an admin iff `users.is_admin = TRUE`. A boolean column
+(not a role table) matches the `users.is_synthetic` precedent. There is no
+self-serve promotion endpoint: the first admin is a manual DB bootstrap
+(`UPDATE users SET is_admin = true WHERE email = '...'`), documented in the
+runbook, never reachable from the API.
+
+DECIDED — there is **no admin role claim in the JWT**. `require_admin` chains
+on `get_current_user`, which loads the `users` row fresh from the DB on every
+request, so a demotion (or suspension) takes effect on the admin's very next
+request with the SAME token — no stale-claim window.
+
+DECIDED — a suspended account (`active = FALSE`) is rejected at
+`get_current_user` with `403 account_suspended` before `require_admin`'s own
+admin check runs. So suspending an admin revokes their admin access
+immediately too, with nothing extra to do.
+
+### Cross-user access (why SECURITY DEFINER, not a second RLS policy)
+
+DECIDED — admin cross-user reads/writes go through SECURITY DEFINER functions
+(migration 013), **not** a permissive second RLS policy on `users`. A
+permissive `admin_can_read_all` policy would OR with `self_only`, letting any
+user with `is_admin = TRUE` read every user row via ordinary SQL — moving the
+trust boundary back into the app layer. With SECURITY DEFINER the bypass lives
+inside the database function, and each function re-checks the caller's
+`is_admin` (from `current_setting('app.user_id')`) inside its own body, so
+even a SQL injection in the app cannot escalate without also knowing the
+function name and holding EXECUTE (granted to `app_user` by migration 013).
+
+DECIDED — `admin_list_users()` returns ONLY the safe columns `(id, email,
+is_admin, active, created_at)` — declared explicitly as `RETURNS TABLE`, not
+`SETOF users`, and an explicit column `SELECT`, not `SELECT *`.
+`password_hash` and `mfa_secret` (the §8 accepted-plaintext TOTP secret) never
+leave the DB. The safe-column contract lives in the **function**, not the
+endpoint, so the API cannot leak them even by forgetting to filter. (The
+original `SETOF users / SELECT *` form — which leaked both — was caught in
+PR #2 review and fixed before merge.)
+
+### Endpoints
+
+Both endpoints are gated by `require_admin` and run inside the app_user
+session RLS-scoped to the **admin's** `app.user_id`. Cross-user access is the
+job of the SECURITY DEFINER functions, which derive their caller context from
+the same `app.user_id`.
+
+`GET /admin/users` → `200`
+List all users in `created_at` order. Metadata only. Each row:
+
+```json
+{
+  "user_id": "uuid",
+  "email": "user@example.com",
+  "is_admin": false,
+  "active": true,
+  "created_at": "2026-09-03T00:00:00+00:00"
+}
+```
+
+Calls `admin_list_users()` (SECURITY DEFINER; bypasses `self_only` RLS; the
+safe-column contract above means no secrets can be returned).
+
+`PATCH /admin/users/{user_id}` body `{"active": bool}` → `200`
+Suspend (`false`) or reactivate (`true`) the target user. Calls
+`admin_set_user_active(target_user_id, active)` (SECURITY DEFINER; re-checks
+the caller's `is_admin` inside the function). Errors — each raised inside the
+DB function and mapped at the API:
+- target does not exist → `404 {"category": "user_not_found"}`
+- the admin trying to suspend their **own** account → `400 {"category":
+  "cannot_self_suspend"}` (fail-closed; an admin who needs to demote
+  themselves does it via direct DB per migration 013)
+
+No token is revoked on suspend, by design: `get_current_user` reads `active`
+fresh from the DB every request, so the suspended user's very next request is
+`403 account_suspended` regardless of any still-valid JWT. No extra revocation
+machinery is needed.
+
+Audit: each suspend/reactivate writes an `audit_log` row — metadata only
+(CLAUDE.md rule 2) — `event_type = "user_suspended" | "user_reactivated"`,
+`user_id` = the acting admin, `target_user_id` = the target (migration 012's
+column, the reason it was added).
+
+### Security notes
+
+- No JWT admin claim: demotion and suspension are effective on the next
+  request with the same token; there is no stale-claim window.
+- The safe-column contract is enforced by the DB function, not the endpoint.
+- Self-suspension is blocked inside the DB function; there is no app-level
+  guard a caller could bypass.
+- Admin endpoints touch user metadata only — document text, quotes, and
+  findings never enter this path.
+
 ## Change log
 
 - v1 (2026-07-13): initial locked version. All DECIDED items chosen from the
@@ -796,3 +898,13 @@ itself is kept or removed is a PR-body discussion, not decided here.
   delivered-awaiting-pickup from still-pending jobs.
   New `outbox` table (migration 011). §5's earlier "Known, accepted gap"
   framing is removed.
+- v1.14 (2026-09-03): added §10, admin user management (the resumed admin-role
+  work of 2026-08-12, third of three PRs) — `GET /admin/users` (list, metadata
+  only) and `PATCH /admin/users/{id}` (suspend/reactivate),
+  both gated by the §3 `require_admin` dependency and backed by migration 013's
+  SECURITY DEFINER functions. Documents the no-JWT-claim identity model
+  (demotion/suspension effective next request), the SECURITY DEFINER-over-RLS
+  rationale, the safe-column contract of `admin_list_users()` (no
+  `password_hash`/`mfa_secret` ever leave the DB), and the `audit_log`
+  metadata row written per suspend/reactivate. No changes to any prior
+  section.
