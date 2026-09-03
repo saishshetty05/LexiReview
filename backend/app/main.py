@@ -76,6 +76,8 @@ _AUTH_ERROR_STATUS = {
     "mfa_required": 200,      # not an error — login returns mfa_required flag
     "invalid_mfa_code": 401,
     "mfa_rate_limited": 429,
+    "account_suspended": 403,
+    "admin_required": 403,
 }
 
 
@@ -165,7 +167,38 @@ def get_current_user(request: Request) -> Iterator[tuple[User, Session]]:
         user = session.get(User, user_id)
         if user is None:
             raise HTTPException(status_code=401, detail={"category": "invalid_token"})
+        # Account suspension (PR #2 of 3): get_current_user loads the User row
+        # fresh from the DB on every request, so this is the single enforcement
+        # point where an admin demotion/suspension takes effect -- no JWT claim
+        # check needed (a suspended user's cached token is invalidated by the
+        # next request loading active=FALSE here, not by anything in the JWT
+        # itself).
+        if not user.active:
+            raise HTTPException(
+                status_code=403, detail={"category": "account_suspended"}
+            )
         yield user, session
+
+
+def require_admin(
+    current: tuple[User, Session] = Depends(get_current_user),
+) -> tuple[User, Session]:
+    """Dependency for admin-only endpoints (PR #2 of 3): chains on
+    get_current_user (so it also enforces authentication + the active check)
+    and rejects non-admins.
+
+    Reads is_admin off the User row get_current_user just loaded from the DB
+    every request -- deliberately NOT a JWT admin claim. A demoted admin's
+    cached token is therefore invalidated on their next request (the fresh
+    User row has is_admin=FALSE), which is exactly the "takes effect
+    immediately" property the design locked in. The SECURITY DEFINER functions
+    (migration 013) additionally re-check is_admin inside the DB, so even a
+    direct SQL call can't escalate.
+    """
+    user, session = current
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail={"category": "admin_required"})
+    yield user, session
 
 
 @app.get("/health")
