@@ -17,9 +17,8 @@ a clear error, not silent cross-user access.
 
 1. `current_user_is_admin()` → BOOLEAN
    Reads is_admin for the calling user (via current_setting('app.user_id')).
-   Used by require_admin in auth.py — called on every admin endpoint request
-   to re-check the DB (not a JWT claim), so demotion/suspension takes effect
-   immediately.
+   Currently unused by the app layer (require_admin in main.py reads the ORM
+   User object directly). Exists for future direct-SQL / admin tooling use.
 
 2. `admin_list_users()` → SETOF RECORD
    Returns (id, email, is_admin, active, created_at) for ALL users.
@@ -107,7 +106,13 @@ $$;
 _ADMIN_LIST_USERS = sa.text(
     """
 CREATE OR REPLACE FUNCTION admin_list_users()
-RETURNS SETOF users
+RETURNS TABLE(
+    id UUID,
+    email TEXT,
+    is_admin BOOLEAN,
+    active BOOLEAN,
+    created_at TIMESTAMPTZ
+)
 LANGUAGE plpgsql
 SECURITY DEFINER
 SET search_path = public
@@ -133,7 +138,8 @@ BEGIN
         RAISE EXCEPTION 'access denied: admin role required'
             USING ERRCODE = 'insufficient_privilege';
     END IF;
-    RETURN QUERY SELECT * FROM users ORDER BY users.created_at;
+    RETURN QUERY SELECT u.id, u.email, u.is_admin, u.active, u.created_at
+        FROM users u ORDER BY u.created_at;
 END;
 $$;
 """
