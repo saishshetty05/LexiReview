@@ -39,6 +39,12 @@ class User(Base):
     # when TRUE does login require a TOTP challenge.
     mfa_secret: Mapped[str | None] = mapped_column(String, nullable=True)
     mfa_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Admin role (PR #1 of 3, paused 2026-08-12, resumed 2026-09-02):
+    # is_admin flags admin access; active gates account suspension.
+    # No JWT claim — require_admin re-checks the DB every request so
+    # demotion/suspension takes effect immediately (PR #2).
+    is_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
 
@@ -169,6 +175,10 @@ class AuditLog(Base):
     event_type: Mapped[str] = mapped_column(String, nullable=False)
     user_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id"), nullable=True)
     doc_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
+    # Admin actions (PR #1 of 3, resumed 2026-09-02): the user an admin
+    # action targets. Nullable, no FK — matches doc_id precedent; the target
+    # user may be deleted later but the audit row should survive.
+    target_user_id: Mapped[uuid.UUID | None] = mapped_column(Uuid, nullable=True)
     # INET in Postgres; falls back to a plain string elsewhere for the same
     # SQLite test-portability reason as `payload` above.
     ip: Mapped[str | None] = mapped_column(String().with_variant(INET(), "postgresql"), nullable=True)
