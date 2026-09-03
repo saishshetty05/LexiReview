@@ -901,8 +901,9 @@ column, the reason it was added).
 - v1.14 (2026-09-03): added §10, admin user management (the resumed admin-role
   work of 2026-08-12, third of three PRs) — `GET /admin/users` (list, metadata
   only) and `PATCH /admin/users/{id}` (suspend/reactivate),
-  both gated by the §3 `require_admin` dependency and backed by migration 013's
-  SECURITY DEFINER functions. Documents the no-JWT-claim identity model
+  both gated by the `require_admin` dependency (defined in `app/main.py`,
+  first specified in §10 itself) and backed by migration 013's SECURITY
+  DEFINER functions. Documents the no-JWT-claim identity model
   (demotion/suspension effective next request), the SECURITY DEFINER-over-RLS
   rationale, the safe-column contract of `admin_list_users()` (no
   `password_hash`/`mfa_secret` ever leave the DB), and the `audit_log`
