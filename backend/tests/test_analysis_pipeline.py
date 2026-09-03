@@ -7,21 +7,35 @@ from __future__ import annotations
 
 import io
 
+import anthropic
+import httpx
+import pytest
+
 from app.analysis_pipeline import run_analysis, run_summary
-from app.llm_client import REQUIRED_NO_ISSUES_PHRASE
+from app.llm_client import REQUIRED_NO_ISSUES_PHRASE, EntailmentResult, ProviderResponseError
 
 
 class _FakeLLMClient:
     """Stands in for a real provider call: returns canned findings/summary
     and records what it was invoked with, so tests can assert the pipeline
     redacted PII before anchoring and passed guardrail flags through
-    correctly."""
+    correctly.
+
+    Defaults `check_entailment` to a fully-supported result so existing
+    tests that don't care about PRD AI-6 (entailment) keep their original
+    "standard" confidence expectations for High/Medium/inconsistency
+    findings -- only tests that explicitly override `entailment_result` (or
+    `entailment_error`) exercise the downgrade path.
+    """
 
     def __init__(self, findings: list[dict] | None = None, summary: dict | None = None) -> None:
         self._findings = findings if findings is not None else []
         self._summary = summary or {"overview": "A lease agreement.", "key_terms": []}
         self.received_blocks = None
         self.received_kwargs: dict | None = None
+        self.entailment_result = EntailmentResult(supported=True, score=1.0)
+        self.entailment_error: Exception | None = None
+        self.entailment_calls: list[dict] = []
 
     def analyze(self, blocks, *, pseudonymised, is_synthetic, severity_examples=None):
         self.received_blocks = blocks
@@ -36,6 +50,19 @@ class _FakeLLMClient:
         self.received_blocks = blocks
         self.received_kwargs = {"pseudonymised": pseudonymised, "is_synthetic": is_synthetic}
         return self._summary
+
+    def check_entailment(self, claim, block_texts, *, pseudonymised, is_synthetic):
+        self.entailment_calls.append(
+            {
+                "claim": claim,
+                "block_texts": block_texts,
+                "pseudonymised": pseudonymised,
+                "is_synthetic": is_synthetic,
+            }
+        )
+        if self.entailment_error is not None:
+            raise self.entailment_error
+        return self.entailment_result
 
 
 def _make_docx_bytes(paragraphs: list[str]) -> bytes:
@@ -211,6 +238,141 @@ def test_original_finding_dicts_passed_by_caller_are_not_mutated():
 
     assert "verification" not in original
     assert "confidence" not in original
+
+
+# ── PRD AI-6: entailment second pass ────────────────────────────────────
+
+REAL_QUOTE_HIGH_FINDING = {
+    "category": "payment",
+    "severity": "high",
+    "block_ids": ["BLOCK_2"],
+    "evidence_quote": "Clause 3: The monthly rent shall be Rs. 50,000, payable on the 5th of each month.",
+    "explanation": "The rent amount is unusually high for this type of property.",
+}
+
+REAL_QUOTE_LOW_FINDING = {
+    **REAL_QUOTE_HIGH_FINDING,
+    "severity": "low",
+}
+
+LOW_SEVERITY_INCONSISTENCY_FINDING = {
+    **INCONSISTENCY_FINDING,
+    "severity": "low",
+}
+
+
+def test_high_severity_verified_finding_gets_entailment_checked():
+    file_bytes = _make_docx_bytes(LEASE_PARAGRAPHS)
+    fake_llm = _FakeLLMClient([REAL_QUOTE_HIGH_FINDING])
+
+    results = run_analysis(file_bytes, "docx", fake_llm, is_synthetic=True)
+
+    assert len(fake_llm.entailment_calls) == 1
+    call = fake_llm.entailment_calls[0]
+    assert call["claim"] == REAL_QUOTE_HIGH_FINDING["explanation"]
+    assert "monthly rent shall be Rs. 50,000" in call["block_texts"][0]
+    assert call["pseudonymised"] is True
+    assert call["is_synthetic"] is True
+    assert results[0]["confidence"] == "standard"
+
+
+def test_entailment_not_supported_downgrades_confidence_but_not_verification():
+    file_bytes = _make_docx_bytes(LEASE_PARAGRAPHS)
+    fake_llm = _FakeLLMClient([REAL_QUOTE_HIGH_FINDING])
+    fake_llm.entailment_result = EntailmentResult(supported=False, score=0.2)
+
+    results = run_analysis(file_bytes, "docx", fake_llm, is_synthetic=True)
+
+    assert results[0]["verification"] == "verified"
+    assert results[0]["confidence"] == "needs_review"
+
+
+def test_low_severity_non_inconsistency_finding_skips_entailment():
+    file_bytes = _make_docx_bytes(LEASE_PARAGRAPHS)
+    fake_llm = _FakeLLMClient([REAL_QUOTE_LOW_FINDING])
+
+    results = run_analysis(file_bytes, "docx", fake_llm, is_synthetic=True)
+
+    assert fake_llm.entailment_calls == []
+    assert results[0]["confidence"] == "standard"
+
+
+def test_inconsistency_finding_gets_entailment_checked_regardless_of_severity():
+    file_bytes = _make_docx_bytes(LEASE_PARAGRAPHS)
+    fake_llm = _FakeLLMClient([LOW_SEVERITY_INCONSISTENCY_FINDING])
+
+    run_analysis(file_bytes, "docx", fake_llm, is_synthetic=True)
+
+    assert len(fake_llm.entailment_calls) == 1
+
+
+def test_missing_clause_never_gets_entailment_checked():
+    file_bytes = _make_docx_bytes(LEASE_PARAGRAPHS)
+    fake_llm = _FakeLLMClient([MISSING_CLAUSE_FINDING])
+
+    run_analysis(file_bytes, "docx", fake_llm, is_synthetic=True)
+
+    assert fake_llm.entailment_calls == []
+
+
+def test_already_unverified_finding_skips_entailment_entirely():
+    """A fabricated quote already sets confidence=needs_review via
+    verification alone -- running entailment on top would only ever
+    re-confirm what's already known, wasting a call the PRD's own '~2x
+    cost for the eligible subset' NFR doesn't budget for."""
+    file_bytes = _make_docx_bytes(LEASE_PARAGRAPHS)
+    fake_llm = _FakeLLMClient([FABRICATED_FINDING])
+
+    results = run_analysis(file_bytes, "docx", fake_llm, is_synthetic=True)
+
+    assert fake_llm.entailment_calls == []
+    assert results[0]["confidence"] == "needs_review"
+
+
+_FAKE_REQUEST = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+_FAKE_RESPONSE = httpx.Response(500, request=_FAKE_REQUEST)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ProviderResponseError("bad shape"),
+        anthropic.APIConnectionError(request=_FAKE_REQUEST),
+        anthropic.RateLimitError("rate limited", response=_FAKE_RESPONSE, body=None),
+        anthropic.OverloadedError("overloaded", response=_FAKE_RESPONSE, body=None),
+    ],
+)
+def test_entailment_error_degrades_confidence_without_failing_the_run(error):
+    """Constitution rule 6's principle applied to entailment: a check that
+    couldn't complete must not silently present as "standard" confidence,
+    but it also must not raise out of run_analysis -- worker.py's
+    _execute_summary precedent (annotate, never fail the job) applies here
+    per-finding instead of per-job."""
+    file_bytes = _make_docx_bytes(LEASE_PARAGRAPHS)
+    fake_llm = _FakeLLMClient([REAL_QUOTE_HIGH_FINDING])
+    fake_llm.entailment_error = error
+
+    results = run_analysis(file_bytes, "docx", fake_llm, is_synthetic=True)
+
+    assert results[0]["verification"] == "verified"
+    assert results[0]["confidence"] == "needs_review"
+
+
+def test_entailment_checked_finding_reuses_confidence_when_block_id_unresolvable():
+    """Defensive path: block_ids should always resolve (the LLM was given
+    the same ids it must cite back), but a finding whose block_ids don't
+    resolve to any known block has nothing to check entailment against."""
+    file_bytes = _make_docx_bytes(LEASE_PARAGRAPHS)
+    bogus_finding = {**REAL_QUOTE_HIGH_FINDING, "block_ids": ["BLOCK_999"]}
+    fake_llm = _FakeLLMClient([bogus_finding])
+
+    results = run_analysis(file_bytes, "docx", fake_llm, is_synthetic=True)
+
+    assert fake_llm.entailment_calls == []
+    # verify_quote still matched the quote text itself against the whole
+    # source, independent of the (bogus) block_ids, so confidence is
+    # whatever verification alone produced.
+    assert results[0]["confidence"] == "standard"
 
 
 # ── run_summary() ────────────────────────────────────────────────────────
