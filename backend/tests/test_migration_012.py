@@ -59,18 +59,18 @@ def test_audit_log_has_target_user_id_column(pg_owner_engine):
                 "WHERE table_name = 'audit_log' AND column_name = 'target_user_id'"
             )
         ).fetchone()
-    assert row is not None, "target_user_id column must exist"
-    assert row.is_nullable == "YES", "target_user_id must be NULLABLE"
+        assert row is not None, "target_user_id column must exist"
+        assert row.is_nullable == "YES", "target_user_id must be NULLABLE"
 
-    # Verify no FK constraint exists (matches doc_id precedent)
-    fk_exists = conn.execute(
-        text(
-            "SELECT 1 FROM pg_constraint "
-            "WHERE conrelid = 'audit_log'::regclass AND contype = 'f' "
-            "AND conname LIKE '%target_user_id%'"
-        )
-    ).scalar()
-    assert fk_exists is None, "target_user_id must have no FK constraint"
+        # Verify no FK constraint exists (matches doc_id precedent)
+        fk_exists = conn.execute(
+            text(
+                "SELECT 1 FROM pg_constraint "
+                "WHERE conrelid = 'audit_log'::regclass AND contype = 'f' "
+                "AND conname LIKE '%target_user_id%'"
+            )
+        ).scalar()
+        assert fk_exists is None, "target_user_id must have no FK constraint"
 
 
 # ── 2. Defaults for existing rows (owner) ─────────────────────────────────
@@ -107,7 +107,14 @@ def test_existing_users_get_correct_defaults(pg_owner_engine):
 # ── 3. RLS still enforced (app_user) ──────────────────────────────────────
 def test_users_rls_still_enforced(pg_app_engine, pg_owner_engine):
     """Verify FORCE RLS on users is still working after adding new columns.
-    User A (app_user session) should not see user B's row.
+
+    Since migration 003, users has a permissive SELECT policy (email_lookup,
+    USING true) for pre-auth login-by-email. Permissive policies OR together,
+    so an unscoped SELECT by app_user isn't filtered — self_only only
+    constrains INSERT/UPDATE. Real app code scopes by id = current_user_id.
+
+    This test verifies self_only by trying an UPDATE on another user's row —
+    it must fail, proving RLS still enforces self-row-only for mutations.
     """
     # Create two users via owner (bypasses RLS)
     user_a_id = uuid.uuid4()
@@ -130,15 +137,17 @@ def test_users_rls_still_enforced(pg_app_engine, pg_owner_engine):
             )
             conn.commit()
 
-        # app_user with user A's ID should only see user A's row
+        # app_user with user A's ID tries to UPDATE user B's row → must fail (self_only enforced)
         with pg_app_engine.connect() as conn:
             conn.execute(text(f"SET LOCAL app.user_id = '{user_a_id}'"))
-            rows = conn.execute(text("SELECT id, email FROM users")).fetchall()
+            result = conn.execute(
+                text("UPDATE users SET email = 'hacked@example.invalid' WHERE id = :id"),
+                {"id": user_b_id}
+            )
             conn.rollback()
 
-        user_ids_visible = {r[0] for r in rows}
-        assert user_a_id in user_ids_visible, "user A must see their own row"
-        assert user_b_id not in user_ids_visible, "user A must NOT see user B's row (RLS enforced)"
+        # UPDATE returned 0 rows (RLS blocked it) — not an error, just no match
+        assert result.rowcount == 0, "user A must NOT be able to UPDATE user B's row (RLS enforced)"
     finally:
         with pg_owner_engine.connect() as conn:
             conn.execute(text("DELETE FROM users WHERE id = :id"), {"id": user_a_id})
