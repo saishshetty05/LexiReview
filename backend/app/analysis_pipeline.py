@@ -11,13 +11,32 @@ seam worker.py needs once that wiring lands, including the is_synthetic flag
 
 from __future__ import annotations
 
+import anthropic
+
 from app.anchors import make_anchors
 from app.extraction import extract_text
-from app.llm_client import REQUIRED_NO_ISSUES_PHRASE, LLMClient
+from app.llm_client import REQUIRED_NO_ISSUES_PHRASE, LLMClient, LLMClientError
 from app.pii_gateway import pseudonymise
 from app.verifier import verify_quote
 
 _RISK_SEVERITIES = ("high", "medium", "low", "info")
+
+# PRD AI-6: High/Medium severity findings get the entailment second pass;
+# so does every inconsistency finding regardless of severity (checked
+# separately in _entailment_eligible). Low/Info non-inconsistency findings
+# rely on quote verification alone, per the PRD.
+_ENTAILMENT_ELIGIBLE_SEVERITIES = ("high", "medium")
+
+# A failed/errored entailment call must degrade this one finding's
+# confidence, not fail or retry the whole analysis job -- the same
+# "annotate, never fail the job" principle worker.py's _execute_summary
+# already applies at the job level, here applied per-finding. Deliberately
+# broader than worker.py's _TRANSIENT_LLM_ERRORS (which decides job-level
+# retryability): every LLMClientError and every anthropic.APIError subclass
+# is treated the same way here, since there is no job-level retry decision
+# to make -- the finding is returned either way, just with confidence
+# reflecting that entailment support could not be confirmed.
+_ENTAILMENT_CHECK_ERRORS = (LLMClientError, anthropic.APIError)
 
 
 def run_analysis(
@@ -42,11 +61,21 @@ def run_analysis(
     extraction = extract_text(file_bytes, file_type)
     pseudonymised = pseudonymise(extraction.text)
     blocks = make_anchors(pseudonymised.text)
+    block_by_id = {block.id: block.text for block in blocks}
 
     raw_findings = llm_client.analyze(
         blocks, pseudonymised=True, is_synthetic=is_synthetic, severity_examples=severity_examples
     )
-    return [_finalize_finding(pseudonymised.text, finding) for finding in raw_findings]
+    return [
+        _finalize_finding(
+            pseudonymised.text,
+            finding,
+            llm_client=llm_client,
+            is_synthetic=is_synthetic,
+            block_by_id=block_by_id,
+        )
+        for finding in raw_findings
+    ]
 
 
 def run_summary(
@@ -99,7 +128,14 @@ def _compute_risk_snapshot(findings: list[dict]) -> dict:
     return snapshot
 
 
-def _finalize_finding(source_text: str, finding: dict) -> dict:
+def _finalize_finding(
+    source_text: str,
+    finding: dict,
+    *,
+    llm_client: LLMClient,
+    is_synthetic: bool,
+    block_by_id: dict[str, str],
+) -> dict:
     finding = dict(finding)
 
     if finding["category"] == "missing_clause":
@@ -122,8 +158,54 @@ def _finalize_finding(source_text: str, finding: dict) -> dict:
 
     result = verify_quote(source_text, finding["evidence_quote"])
     finding["verification"] = result.verification
-    # CONTRACTS.md §2's other needs_review trigger — entailment-pass scoring
-    # — isn't implemented anywhere yet, so confidence here reflects
-    # verification only, not entailment.
     finding["confidence"] = "standard" if result.verification == "verified" else "needs_review"
+
+    # PRD AI-6: the entailment second pass only has something to add when
+    # the quote itself is genuinely in the document (verification=verified)
+    # and the finding is High/Medium severity or an inconsistency -- running
+    # it against an already-fabricated quote would just re-flag confidence
+    # that's already "needs_review", wasting a call. It can only ever
+    # downgrade confidence here, never upgrade past what verification set.
+    if finding["confidence"] == "standard" and _entailment_eligible(finding):
+        finding["confidence"] = _entailment_confidence(
+            finding, llm_client=llm_client, is_synthetic=is_synthetic, block_by_id=block_by_id
+        )
+
     return finding
+
+
+def _entailment_eligible(finding: dict) -> bool:
+    return (
+        finding["category"] == "inconsistency"
+        or finding["severity"] in _ENTAILMENT_ELIGIBLE_SEVERITIES
+    )
+
+
+def _entailment_confidence(
+    finding: dict,
+    *,
+    llm_client: LLMClient,
+    is_synthetic: bool,
+    block_by_id: dict[str, str],
+) -> str:
+    block_texts = [block_by_id[bid] for bid in finding["block_ids"] if bid in block_by_id]
+    if not block_texts:
+        # Defensive: block_ids should always resolve to real blocks by this
+        # point (the LLM was given the same block ids it must cite), but if
+        # one doesn't, there is nothing to check entailment against --
+        # leave confidence as verification already set it rather than guess.
+        return finding["confidence"]
+
+    try:
+        result = llm_client.check_entailment(
+            finding["explanation"], block_texts, pseudonymised=True, is_synthetic=is_synthetic
+        )
+    except _ENTAILMENT_CHECK_ERRORS:
+        # Fail-safe, constitution rule 6's principle applied to entailment:
+        # a check that couldn't complete is indistinguishable from a check
+        # that failed, so both must not silently present as "standard"
+        # confidence. Does NOT fail the job (worker.py's _execute_summary
+        # precedent) -- the finding is still returned, just downgraded.
+        return "needs_review"
+
+    return "standard" if result.supported else "needs_review"

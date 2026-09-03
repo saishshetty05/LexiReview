@@ -36,6 +36,16 @@ TIMEOUT_SECONDS = 180
 ANTHROPIC_MAX_RETRIES = 3
 ANTHROPIC_MAX_TOKENS = 4096
 
+# PRD AI-6 / CONTRACTS.md §2: below this, the cited block(s) are judged not
+# to genuinely support a finding's claim -- confidence downgrades to
+# "needs_review" (analysis_pipeline.py), the same "flagged, never silently
+# dropped" principle as verifier.py's FUZZY_MATCH_THRESHOLD. Set lower than
+# quote verification's threshold deliberately: entailment is a semantic
+# judgment call, not a string-matching one, so demanding the same
+# near-certainty would produce far more false "needs_review" flags than the
+# check is meant to catch.
+ENTAILMENT_SCORE_THRESHOLD = 0.70
+
 # CONTRACTS.md §2 — one finding object's shape; constrains provider output
 # once a real call is implemented.
 FINDING_JSON_SCHEMA = {
@@ -188,6 +198,52 @@ _FORBIDDEN_SAFETY_PHRASES = (
 # on its own.
 REQUIRED_NO_ISSUES_PHRASE = "no issues detected by automated review"
 
+# PRD AI-6: the entailment second pass's forced-tool schema. Deliberately
+# minimal -- just the score analysis_pipeline.py compares against
+# ENTAILMENT_SCORE_THRESHOLD. No free-text reasoning field: this call's
+# input already includes the finding's own explanation and the cited block
+# text, and a reasoning field would risk the provider echoing document
+# content into a place nothing downstream is built to keep confidential
+# (CLAUDE.md rule 2).
+ENTAILMENT_JSON_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "support_score": {"type": "number", "minimum": 0, "maximum": 1},
+    },
+    "required": ["support_score"],
+}
+
+_RECORD_ENTAILMENT_TOOL = {
+    "name": "record_entailment",
+    "description": "Record how well the cited text supports the claim.",
+    "input_schema": ENTAILMENT_JSON_SCHEMA,
+}
+
+# PRD AI-6: "an isolated adversarial LLM call asks 'does the cited block
+# actually support this claim?'" -- isolated meaning both stateless (AI-11:
+# no shared thread with the analyze() call that produced the claim) and
+# adversarial (explicitly told to be skeptical, not to charitably fill in
+# gaps the way the original analysis call might).
+_ENTAILMENT_SYSTEM_PROMPT = (
+    "You are a skeptical fact-checker reviewing another AI's claim about a "
+    "legal document. You are given a CLAIM and the CITED TEXT the other AI "
+    "says supports it. Your only job is to judge whether the cited text "
+    "actually, substantively supports the claim -- not whether the claim is "
+    "plausible in general, and not whether the cited text is merely related "
+    "to the same topic. Report your judgment via the record_entailment tool "
+    "only -- do not respond in plain text. support_score is a number from "
+    "0.0 to 1.0: 1.0 means the cited text fully and unambiguously supports "
+    "the claim; 0.0 means the cited text does not support the claim at all "
+    "(wrong topic, contradicts the claim, or the claim overstates what the "
+    "text actually says). Be skeptical -- your job is to catch "
+    "overinterpretation, not to be charitable to the other AI's reasoning."
+)
+
+
+def _entailment_prompt(claim: str, block_texts: list[str]) -> str:
+    cited_text = "\n\n".join(block_texts)
+    return f"CLAIM:\n{claim}\n\nCITED TEXT:\n{cited_text}"
+
 
 def _contains_forbidden_phrase(text: str) -> bool:
     lowered = text.lower()
@@ -313,6 +369,16 @@ class LLMConfig:
         return cls(provider=provider, model=model, synthetic_only=synthetic_only)
 
 
+@dataclass(frozen=True)
+class EntailmentResult:
+    """PRD AI-6. Mirrors verifier.VerificationResult's shape -- a bool the
+    caller acts on plus the raw score for anything that wants it (logging,
+    future tuning), with the threshold comparison already applied."""
+
+    supported: bool
+    score: float
+
+
 class LLMClient:
     """Provider-agnostic entry point for clause analysis.
 
@@ -388,6 +454,37 @@ class LLMClient:
             "call is wired up yet"
         )
 
+    def check_entailment(
+        self,
+        claim: str,
+        block_texts: list[str],
+        *,
+        pseudonymised: bool,
+        is_synthetic: bool,
+    ) -> EntailmentResult:
+        """PRD AI-6 / CONTRACTS.md §2: an isolated adversarial call asking
+        whether `block_texts` (the finding's cited block(s)) actually
+        support `claim` (the finding's explanation) -- a stateless,
+        independent second opinion (AI-11), never chained onto the
+        analyze() call that produced the claim in the first place.
+
+        Called once per eligible finding by analysis_pipeline.py, not
+        batched across a document's findings: CONTRACTS.md §2c already
+        chose separate calls over one combined call for summarize() vs
+        analyze() on determinism grounds alone; here batching would also
+        let the model see other findings while judging this one,
+        undermining the "isolated" requirement itself.
+        """
+        api_key = self._resolve_api_key(pseudonymised=pseudonymised, is_synthetic=is_synthetic)
+
+        if self.config.provider == "anthropic":
+            return self._check_entailment_anthropic(claim, block_texts, api_key)
+
+        raise NotImplementedError(
+            f"LLMClient stub: {self.config.provider!r} guardrails passed but no provider "
+            "call is wired up yet"
+        )
+
     def _analyze_anthropic(
         self, blocks: list[Block], api_key: str, *, severity_examples: list[dict] | None = None
     ) -> list[dict]:
@@ -451,3 +548,34 @@ class LLMClient:
                 return {"overview": overview, "key_terms": key_terms}
 
         raise ProviderResponseError("no record_summary tool_use block in provider response")
+
+    def _check_entailment_anthropic(
+        self, claim: str, block_texts: list[str], api_key: str
+    ) -> EntailmentResult:
+        client = anthropic.Anthropic(
+            api_key=api_key,
+            timeout=TIMEOUT_SECONDS,
+            max_retries=ANTHROPIC_MAX_RETRIES,
+        )
+        response = client.messages.create(
+            model=self.config.model,
+            max_tokens=ANTHROPIC_MAX_TOKENS,
+            # temperature is deprecated for Claude models released after
+            # Opus 4.6 (April 2026) -- newer models are deterministic-by-
+            # default with no value specified. See docs/DECISION_LOG.md
+            # 2026-07-23.
+            system=_ENTAILMENT_SYSTEM_PROMPT,
+            tools=[_RECORD_ENTAILMENT_TOOL],
+            tool_choice={"type": "tool", "name": "record_entailment"},
+            messages=[{"role": "user", "content": _entailment_prompt(claim, block_texts)}],
+        )
+
+        for content_block in response.content:
+            if content_block.type == "tool_use" and content_block.name == "record_entailment":
+                score = content_block.input.get("support_score")
+                if not isinstance(score, (int, float)) or isinstance(score, bool):
+                    raise ProviderResponseError("record_entailment.support_score was not a number")
+                score = float(score)
+                return EntailmentResult(supported=score >= ENTAILMENT_SCORE_THRESHOLD, score=score)
+
+        raise ProviderResponseError("no record_entailment tool_use block in provider response")
