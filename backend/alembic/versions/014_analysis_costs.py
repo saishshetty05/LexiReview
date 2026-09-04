@@ -51,7 +51,9 @@ def upgrade() -> None:
         sa.Column("model", sa.String(), nullable=False),
         sa.Column("input_tokens", sa.Integer(), nullable=False),
         sa.Column("output_tokens", sa.Integer(), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()
+        ),
     )
     op.create_index(
         "ix_analysis_costs_user_id_created_at",

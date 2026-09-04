@@ -82,6 +82,19 @@ def test_analysis_costs_columns_and_constraints(pg_owner_engine):
                 "SELECT indexname, indexdef FROM pg_indexes WHERE tablename = 'analysis_costs'"
             )
         ).fetchall()
+        created_at_default = conn.execute(
+            text(
+                "SELECT column_default FROM information_schema.columns "
+                "WHERE table_name = 'analysis_costs' AND column_name = 'created_at'"
+            )
+        ).scalar()
+
+    # §11's table spec says "default now()" (unlike most other tables' contract
+    # wording, which says "set by API/worker on insert") -- a real DB-level
+    # server_default, not just the ORM's Python-side default, so any future
+    # non-ORM writer that omits created_at still gets the contract's promised
+    # value instead of a NOT NULL violation.
+    assert created_at_default is not None and "now()" in created_at_default
 
     columns = {r[0]: r[1] for r in table_rows}
     assert columns["id"] == "NO"
