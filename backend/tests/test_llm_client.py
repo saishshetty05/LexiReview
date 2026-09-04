@@ -310,6 +310,31 @@ def test_llm_client_call_log_starts_empty():
     assert client.call_log == []
 
 
+def test_anthropic_analyze_logs_zero_tokens_when_usage_missing(monkeypatch):
+    """A real Anthropic response always carries usage, but _log_usage must
+    not depend on that: if it were ever missing/None, call_log still gets
+    an entry (0/0 tokens) rather than raising before anything is appended
+    -- losing the row entirely would defeat the whole point of capturing
+    usage before response parsing (CONTRACTS.md §11's quota-leak fix)."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-test")
+    response_without_usage = SimpleNamespace(
+        content=[SimpleNamespace(type="tool_use", name="record_findings", input={"findings": []})],
+        usage=None,
+    )
+    monkeypatch.setattr(
+        llm_client.anthropic,
+        "Anthropic",
+        lambda **kwargs: _FakeAnthropicClient(response=response_without_usage),
+    )
+
+    client = LLMClient(_config(provider="anthropic", model="claude-haiku", synthetic_only=False))
+    client.analyze([], pseudonymised=True, is_synthetic=False)
+
+    assert client.call_log == [
+        llm_client.LLMCallUsage(call_type="analyze", model="claude-haiku", input_tokens=0, output_tokens=0)
+    ]
+
+
 # ── summarize() ──────────────────────────────────────────────────────────
 # Guardrails (pseudonymisation, synthetic-only, provider config) are shared
 # with analyze() via LLMClient._resolve_api_key -- these tests confirm

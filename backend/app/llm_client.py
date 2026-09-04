@@ -513,14 +513,25 @@ class LLMClient:
     def _log_usage(self, call_type: str, response: object) -> None:
         """Appends to call_log immediately after messages.create() returns,
         before any response parsing -- see LLMCallUsage's docstring for why
-        capture must not depend on the response being well-formed."""
-        usage = response.usage
+        capture must not depend on the response being well-formed.
+
+        Defensive against a missing/malformed usage block itself (not just a
+        malformed `content` shape, which is what the tool-call parsing below
+        already guards): a real Anthropic response always carries `usage`,
+        but if it somehow didn't, a bare `response.usage.input_tokens` would
+        raise here -- before anything is appended -- and quietly defeat the
+        whole point of logging this early. Missing token counts fall back to
+        0 rather than losing the row: the quota count is COUNT(DISTINCT
+        job_id), so a 0/0 entry still correctly counts this call, just
+        without a token figure to show for it.
+        """
+        usage = getattr(response, "usage", None)
         self.call_log.append(
             LLMCallUsage(
                 call_type=call_type,
                 model=self.config.model,
-                input_tokens=usage.input_tokens,
-                output_tokens=usage.output_tokens,
+                input_tokens=getattr(usage, "input_tokens", 0) or 0,
+                output_tokens=getattr(usage, "output_tokens", 0) or 0,
             )
         )
 
