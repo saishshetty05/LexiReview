@@ -822,25 +822,36 @@ rows are written** — same "rejection writes nothing" property preflight
 itself established (CLAUDE.md rule 8), not bolted on after the insert with
 a compensating delete.
 
-PROPOSED — count definition: the number of the caller's `analysis_jobs`
-rows created since the start of the current UTC calendar month, in state
-`running`, `succeeded`, or `failed` — i.e. any job that has been picked up
-by the worker at least once. This is a derived `COUNT(*)` query, not a
-counter column (can't drift, needs no new write path). Deliberately
-excludes state `queued`, which covers two cases:
-  1. A job whose outbox row was dead-lettered (§5/§1, v1.13) never leaves
-     `queued` — that's a broker/system-side failure, not the user's fault,
-     and must not burn their quota.
-  2. A job momentarily `queued` awaiting worker pickup, or `queued` after a
-     transient-failure retry (§1's `running -> queued` arrow) — counting it
-     only once it actually runs is a conservative undercount (self-corrects
-     within seconds), accepted rather than adding outbox-join complexity to
-     the count query.
-Accepted race, same shape as FR-6's pre-migration-007 dedup window: a user
-firing several uploads faster than the count query + worker pickup can
-observe them could squeeze past the limit by a handful of jobs in the same
-few seconds. Low-value to abuse (still burns real LLM spend once those jobs
-run), not worth a DB-level counter/constraint for v1.
+PROPOSED — count definition (revised during review — see DECISION_LOG.md
+2026-09-04): `COUNT(DISTINCT job_id)` over the caller's rows in
+`analysis_costs` (below) created since the start of the current UTC
+calendar month — i.e. the number of distinct jobs that made at least one
+real LLM provider call this month, not a state read off `analysis_jobs`.
+
+An earlier draft of this proposal counted `analysis_jobs` rows in state
+`running`/`succeeded`/`failed`, reasoning that excluding `queued` alone
+protects the user from system-side failures (a dead-lettered outbox row
+never leaves `queued`). Review caught the gap: `failed` is not equivalent
+to "an LLM call happened" — a job can reach `failed` from an extraction or
+storage error, or a guardrail refusal in `_resolve_api_key`, before
+`analyze()` is ever called, consuming zero real spend. Counting `failed`
+unconditionally forgave one class of system-side failure (broker/dead-
+letter) while still charging another (pre-LLM pipeline failure), which
+contradicted the section's own stated principle. Deriving the count from
+`analysis_costs` instead — write one row per provider call that actually
+happens (below) — collapses both cases under one rule: *you're charged for
+what actually called the LLM, nothing else*. A job that never reaches a
+provider call, for any reason, writes zero cost rows and doesn't count. A
+job that does call the LLM counts once regardless of what happens to the
+job afterward (job-level failure post-call still burned real spend).
+
+Accepted tradeoff: this couples the quota check (`upload_document`, Person
+A's lane) to `analysis_costs` (written by the worker, Person B's lane).
+Both proposals already need the same new table, so the coupling is one
+shared table, not new cross-lane surface. It also removes the prior
+proposal's `queued`-window race (a user firing uploads faster than worker
+pickup could observe them) — counting realized spend rather than job
+submissions means there's nothing to race against.
 
 PROPOSED — a re-upload (rule 9: new version row, immutable) counts like any
 other upload. It creates a new `analysis_jobs` row and runs a full
@@ -929,10 +940,14 @@ transiently for debugging.
   like preflight; new `analysis_costs` table (metadata only, rule 2), written
   by the worker per provider call. Straddles both lanes — quota is Person A's
   `upload_document`, cost logging is Person B's `llm_client.py`/
-  `analysis_pipeline.py`. Open questions (quota default value, migration
-  split) flagged in the section itself, not decided here. Needs both devs'
-  sign-off before this loses PROPOSED status, same play as §9/§1 (v1.13)
-  before it.
+  `analysis_pipeline.py`. Count definition revised same-day during review:
+  `COUNT(DISTINCT job_id)` over `analysis_costs` rows, not `analysis_jobs`
+  state — closes an inconsistency where a pre-LLM-call job failure (e.g.
+  extraction error) was charged while a dead-lettered broker failure was
+  forgiven, despite both being system-side. Open questions (quota default
+  value, migration split) flagged in the section itself, not decided here.
+  Needs both devs' sign-off before this loses PROPOSED status, same play as
+  §9/§1 (v1.13) before it.
 - v1 (2026-07-13): initial locked version. All DECIDED items chosen from the
   defaults proposed in PROJECT_STATUS.md §6; example finding written for the fake
   lease rent-inconsistency case (BLOCK_4 vs BLOCK_19).
