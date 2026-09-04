@@ -224,6 +224,9 @@ export function useAdminUsersQuery(enabled: boolean) {
 // Optimistic toggle, same shape as useSetFindingDecisionMutation: update the
 // cached row immediately, roll back on failure. A failed mutation (e.g.
 // cannot_self_suspend) surfaces via ApiError for the caller to toast.
+// onSettled invalidates regardless of outcome -- defense-in-depth so the
+// list eventually reflects server truth even if the optimistic write and
+// the real result ever disagree, not just on the rollback path.
 export function useSetUserActiveMutation() {
   const queryClient = useQueryClient();
   const queryKey = ["admin-users"];
@@ -240,6 +243,9 @@ export function useSetUserActiveMutation() {
     },
     onError: (_err, _vars, context) => {
       if (context?.previous) queryClient.setQueryData(queryKey, context.previous);
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey });
     },
   });
 }
