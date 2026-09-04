@@ -55,6 +55,10 @@ const CATEGORY_MESSAGES: Record<string, string> = {
   mfa_not_configured: "Two-factor authentication is not configured.",
   invalid_mfa_code: "Invalid authentication code. Please try again.",
   mfa_rate_limited: "Too many failed attempts. Please wait a few minutes and try again.",
+  account_suspended: "This account has been suspended.",
+  admin_required: "You don't have permission to view this page.",
+  user_not_found: "That user no longer exists.",
+  cannot_self_suspend: "You can't suspend your own account.",
 };
 
 // A 401 in one of these categories means the access token itself is
@@ -342,4 +346,38 @@ export function getDocumentFile(docId: string): Promise<DocumentFile> {
 
 export function getDocuments(): Promise<DocumentListItem[]> {
   return request<DocumentListItem[]>("/documents");
+}
+
+// CONTRACTS.md §3(c) (v1.16): the caller's own identity, including is_admin
+// -- backs the admin-nav-visibility check, since there was previously no
+// server-truth endpoint for this at all.
+export interface CurrentUser {
+  user_id: string;
+  email: string;
+  is_admin: boolean;
+}
+
+export function getCurrentUser(): Promise<CurrentUser> {
+  return request<CurrentUser>("/auth/me");
+}
+
+// CONTRACTS.md §10 (v1.14): admin-only user management.
+export interface AdminUserRow {
+  user_id: string;
+  email: string;
+  is_admin: boolean;
+  active: boolean;
+  created_at: string;
+}
+
+export function adminListUsers(): Promise<AdminUserRow[]> {
+  return request<AdminUserRow[]>("/admin/users");
+}
+
+export function adminSetUserActive(userId: string, active: boolean): Promise<{ user_id: string; active: boolean }> {
+  return request(`/admin/users/${userId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ active }),
+  });
 }

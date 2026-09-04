@@ -235,6 +235,19 @@ def auth_login(body: LoginRequest, response: Response) -> dict:
     return {"user_id": str(user.id)}
 
 
+@app.get("/auth/me")
+def auth_me(current: tuple[User, Session] = Depends(get_current_user)) -> dict:
+    """CONTRACTS.md §3(c): the current user's own identity, including
+    is_admin -- there was previously no server-truth endpoint for this at
+    all (useAuth.tsx's own docstring flagged the gap), so the frontend had
+    no way to know whether to show admin-only UI. Reuses get_current_user
+    (auth + active check), no new RLS surface -- self-only, same as every
+    other user-scoped read.
+    """
+    user, _ = current
+    return {"user_id": str(user.id), "email": user.email, "is_admin": user.is_admin}
+
+
 @app.post("/auth/mfa/setup")
 def auth_mfa_setup(current: tuple[User, Session] = Depends(get_current_user)) -> MFASetupResponse:
     """Generate a new TOTP secret and return QR code + backup code.

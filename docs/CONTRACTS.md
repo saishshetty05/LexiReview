@@ -222,6 +222,17 @@ the UI must render them in a visually distinct "Unverified — quote could not b
 matched to the document" section. They count in the findings total. They are never
 exported as verified.
 
+DECIDED — (c) `GET /auth/me` (v1.16): returns `{"user_id", "email",
+"is_admin"}` for the caller, self-only. Added to close a gap `useAuth.tsx`'s
+own docstring had flagged since #47 — there was no server-truth endpoint
+for the logged-in user's identity at all, so the frontend had no way to
+know whether to render admin-only UI (§10) short of guessing from a 403 on
+`/admin/users` itself. Reuses `get_current_user` (auth + active check), no
+new RLS surface — the same self-only read every other user-scoped endpoint
+already does. Does not replace `useAuth.tsx`'s existing client-side
+known-logged-in/email tracking (out of scope here); only backs the new
+admin-nav-visibility check.
+
 ## 1a. Document synthetic flag (v1.3)
 
 `documents.is_synthetic boolean NOT NULL DEFAULT FALSE` — a property of the
@@ -934,6 +945,12 @@ transiently for debugging.
 
 ## Change log
 
+- v1.16 (2026-09-04): added §3(c), `GET /auth/me` — `{"user_id", "email",
+  "is_admin"}` for the caller, self-only. Closes a gap `useAuth.tsx` had
+  flagged in its own docstring since #47 (no server-truth identity
+  endpoint existed at all). Built to back the new admin-users frontend
+  page's nav-visibility check (§10), reusing `get_current_user` with no
+  new RLS surface.
 - v1.15 (2026-09-04): added §11 (PROPOSED, not locked) — PRD FR-16, per-user
   monthly analysis quota + per-call token/cost logging. Global env-configured
   quota (per-user override deferred), enforced pre-write in `upload_document`

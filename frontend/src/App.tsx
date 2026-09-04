@@ -1,6 +1,7 @@
 import { lazy, Suspense } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { Loader2 } from "lucide-react";
+import { AdminRoute } from "@/components/layout/AdminRoute";
 import { ProtectedRoute } from "@/components/layout/ProtectedRoute";
 
 // Route-level code splitting: each page (and whatever it statically imports
@@ -21,6 +22,9 @@ const TeamSettingsPage = lazy(() =>
 );
 const BillingSettingsPage = lazy(() =>
   import("@/pages/settings/BillingSettingsPage").then((m) => ({ default: m.BillingSettingsPage })),
+);
+const AdminUsersPage = lazy(() =>
+  import("@/pages/admin/AdminUsersPage").then((m) => ({ default: m.AdminUsersPage })),
 );
 
 function RouteFallback() {
@@ -84,6 +88,14 @@ export default function App() {
             <ProtectedRoute>
               <BillingSettingsPage />
             </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/admin/users"
+          element={
+            <AdminRoute>
+              <AdminUsersPage />
+            </AdminRoute>
           }
         />
         <Route path="*" element={<Navigate to="/" replace />} />
