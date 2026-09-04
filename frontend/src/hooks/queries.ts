@@ -7,8 +7,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { Decision } from "@/types/decision";
 import type { Finding, Severity } from "@/types/finding";
 import {
+  type AdminUserRow,
   type JobStatus,
+  adminListUsers,
+  adminSetUserActive,
   deleteAccount,
+  getCurrentUser,
   getDocumentFile,
   getDocumentSummary,
   getDocuments,
@@ -195,5 +199,53 @@ export function useMFAStatusQuery() {
   return useQuery({
     queryKey: ["mfa-status"],
     queryFn: mfaStatus,
+  });
+}
+
+// ── Current user / admin ────────────────────────────────────────────────────
+
+export function useCurrentUserQuery(enabled = true) {
+  return useQuery({
+    queryKey: ["current-user"],
+    queryFn: getCurrentUser,
+    enabled,
+    staleTime: 60_000, // is_admin/active changes are rare; avoid refetching on every nav
+  });
+}
+
+export function useAdminUsersQuery(enabled: boolean) {
+  return useQuery({
+    queryKey: ["admin-users"],
+    queryFn: adminListUsers,
+    enabled,
+  });
+}
+
+// Optimistic toggle, same shape as useSetFindingDecisionMutation: update the
+// cached row immediately, roll back on failure. A failed mutation (e.g.
+// cannot_self_suspend) surfaces via ApiError for the caller to toast.
+// onSettled invalidates regardless of outcome -- defense-in-depth so the
+// list eventually reflects server truth even if the optimistic write and
+// the real result ever disagree, not just on the rollback path.
+export function useSetUserActiveMutation() {
+  const queryClient = useQueryClient();
+  const queryKey = ["admin-users"];
+
+  return useMutation({
+    mutationFn: ({ userId, active }: { userId: string; active: boolean }) => adminSetUserActive(userId, active),
+    onMutate: async ({ userId, active }) => {
+      await queryClient.cancelQueries({ queryKey });
+      const previous = queryClient.getQueryData<AdminUserRow[]>(queryKey);
+      queryClient.setQueryData<AdminUserRow[]>(queryKey, (old) =>
+        old?.map((u) => (u.user_id === userId ? { ...u, active } : u)),
+      );
+      return { previous };
+    },
+    onError: (_err, _vars, context) => {
+      if (context?.previous) queryClient.setQueryData(queryKey, context.previous);
+    },
+    onSettled: () => {
+      queryClient.invalidateQueries({ queryKey });
+    },
   });
 }
