@@ -807,33 +807,35 @@ column, the reason it was added).
 - Admin endpoints touch user metadata only — document text, quotes, and
   findings never enter this path.
 
-## 11. Per-user quotas + cost logging (PRD FR-16) (v1.15 — PROPOSED, not yet locked)
+## 11. Per-user quotas + cost logging (PRD FR-16) (v1.15)
 
 FR-16 (PRD): "Per-user monthly analysis quota (configurable) with clear
 in-UI feedback; per-analysis token and cost logging for operational
 visibility." Two halves, straddling both lanes: quota enforcement sits in
 `POST /documents/upload` (Person A's endpoint), cost logging sits in
 `LLMClient`/`analysis_pipeline.py` (Person B's lane). Drafted as one section
-since both read the same new table; PROPOSED here for joint review before
-either half is built, same play as §9/outbox (v1.13) before it. Needs both
-devs' sign-off before this heading loses "PROPOSED."
+since both read the same new table, same play as §9/outbox (v1.13) before
+it. LOCKED 2026-09-04 — both devs signed off; the count-semantics fix below
+was caught and resolved in review before lock, and the two open questions
+below (quota default, PR split) were settled the same day. Ships as a
+single implementation PR (not split by lane) per that same decision.
 
 ### Quota enforcement
 
-PROPOSED — scope is a single global monthly cap, not per-user. New env var
-`ANALYSIS_QUOTA_MONTHLY` (int, default TBD), read once via
-`LLMConfig`-style `from_env()`. A per-user override (naturally surfaced via
-`/admin/users`, §10) is real future work but is explicitly OUT of this
-version — folding it in now would pull §10 into this PR and blow the <400
-line convention. Noting it here so it isn't silently forgotten.
+DECIDED — scope is a single global monthly cap, not per-user. New env var
+`ANALYSIS_QUOTA_MONTHLY` (int, **default 200**, settled 2026-09-04), read
+once via `LLMConfig`-style `from_env()`. A per-user override (naturally
+surfaced via `/admin/users`, §10) is real future work but is explicitly OUT
+of this version — folding it in now would pull §10 into this PR and blow
+the <400 line convention. Noting it here so it isn't silently forgotten.
 
-PROPOSED — enforced in `upload_document` (`app/main.py`), checked
+DECIDED — enforced in `upload_document` (`app/main.py`), checked
 **after preflight passes, before any of the documents/analysis_jobs/outbox
 rows are written** — same "rejection writes nothing" property preflight
 itself established (CLAUDE.md rule 8), not bolted on after the insert with
 a compensating delete.
 
-PROPOSED — count definition (revised during review — see DECISION_LOG.md
+DECIDED — count definition (revised during review — see DECISION_LOG.md
 2026-09-04): `COUNT(DISTINCT job_id)` over the caller's rows in
 `analysis_costs` (below) created since the start of the current UTC
 calendar month — i.e. the number of distinct jobs that made at least one
@@ -864,18 +866,18 @@ proposal's `queued`-window race (a user firing uploads faster than worker
 pickup could observe them) — counting realized spend rather than job
 submissions means there's nothing to race against.
 
-PROPOSED — a re-upload (rule 9: new version row, immutable) counts like any
+DECIDED — a re-upload (rule 9: new version row, immutable) counts like any
 other upload. It creates a new `analysis_jobs` row and runs a full
 analysis, so it consumes real quota-worthy cost regardless of whether the
 bytes are identical to a prior version. (Exact-duplicate re-upload is
 already blocked earlier, by FR-6's `409 duplicate_document` — this only
 concerns genuinely new versions.)
 
-PROPOSED — rejection response: `429` (semantically correct for a rate/quota
+DECIDED — rejection response: `429` (semantically correct for a rate/quota
 limit, distinct from `403 account_suspended`'s policy-denial precedent),
 category `quota_exceeded`:
 ```json
-{"category": "quota_exceeded", "message": "...", "limit": 100, "used": 100,
+{"category": "quota_exceeded", "message": "...", "limit": 200, "used": 200,
  "resets_at": "2026-10-01T00:00:00+00:00"}
 ```
 `resets_at` is always the first of next UTC month at 00:00 — lets the
@@ -887,7 +889,7 @@ feedback" clause).
 
 ### Cost logging
 
-PROPOSED — new table `analysis_costs`, one row per LLM provider call (not
+DECIDED — new table `analysis_costs`, one row per LLM provider call (not
 per job — a job can generate up to three: `analyze`, `summarize`,
 `check_entailment` x N eligible findings, per §2/§2c/§2 AI-6):
 
@@ -902,13 +904,13 @@ per job — a job can generate up to three: `analyze`, `summarize`,
 | output_tokens | int | from the provider response's usage block |
 | created_at | timestamptz | default now() |
 
-PROPOSED — **tokens are stored, currency is not.** Cost is computed at read
+DECIDED — **tokens are stored, currency is not.** Cost is computed at read
 time from `(model, input_tokens, output_tokens)` against a rate table kept
 in code/config, not frozen into the row — a frozen computed cost would bake
 in whatever rate was live at write time and couldn't be recomputed if rates
 change later.
 
-PROPOSED — written by the **worker**, inside the same `app_user_session(uid)`
+DECIDED — written by the **worker**, inside the same `app_user_session(uid)`
 block that already exists around each provider call in
 `analysis_pipeline.py` (mirrors the `_execute_summary`/entailment
 "annotate, never fail the job" pattern — a cost-log write failure must not
@@ -917,7 +919,7 @@ fail the job). Each of `LLMClient.analyze()`/`summarize()`/
 back to its caller (currently discarded) — exact call-site mechanics are an
 implementation detail for the code PR, not locked here.
 
-PROPOSED — no `relay` role grant needed: only the `app_user`-scoped worker
+DECIDED — no `relay` role grant needed: only the `app_user`-scoped worker
 connection writes this table, same as `analysis_jobs`/`decisions`. Confirm
 this holds at implementation time rather than assuming it.
 
@@ -927,24 +929,32 @@ only — tokens, model string, `job_id`, timestamps. Prompt text, completion
 text, or anything document-derived MUST NOT be written to this table, even
 transiently for debugging.
 
-### Open questions for review (not yet decided)
+### Settled at lock (2026-09-04)
 
-- Exact value of `ANALYSIS_QUOTA_MONTHLY`'s default — a product/cost call,
-  not an engineering one.
+- `ANALYSIS_QUOTA_MONTHLY` default: **200**.
+- Implementation ships as a **single PR**, not split by lane — quota
+  enforcement (`upload_document`) and cost logging
+  (`llm_client.py`/`analysis_pipeline.py`) share the one `analysis_costs`
+  migration, reviewed together rather than as two PRs coordinating a shared
+  migration across a base-branch dependency.
+
+### Deferred (not blocking lock)
+
 - Whether `analysis_costs` needs an index beyond `(user_id, created_at)`
   once there's a use for querying it (no read endpoint is proposed in this
   version — "operational visibility" is satisfied by the table existing and
   being queryable directly, not by a new API surface. A `GET
   /admin/costs`-style endpoint is real future work, not in scope here).
-- Split of implementation PRs: quota enforcement (migration + `main.py`
-  change) is Person A's lane by precedent (§5's `upload_document` is A's);
-  cost logging (migration + `llm_client.py`/`analysis_pipeline.py` change)
-  is Person B's. Both need the same migration (one new table), so either
-  one migration PR shared by both proposed changes, or two migrations —
-  to be settled in review, not decided unilaterally here.
 
 ## Change log
 
+- v1.17 (2026-09-04): §11 (PRD FR-16) LOCKED — both devs signed off. Two
+  open sub-questions settled: `ANALYSIS_QUOTA_MONTHLY` default is 200;
+  implementation ships as a single PR spanning both lanes rather than two
+  PRs coordinating a shared migration. No other content changed from the
+  v1.15 draft (#100) beyond flipping PROPOSED language to DECIDED and
+  updating the JSON example's illustrative numbers to match the settled
+  default. Implementation PRs may now start.
 - v1.16 (2026-09-04): added §3(c), `GET /auth/me` — `{"user_id", "email",
   "is_admin"}` for the caller, self-only. Closes a gap `useAuth.tsx` had
   flagged in its own docstring since #47 (no server-truth identity
