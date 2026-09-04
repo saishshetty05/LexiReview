@@ -39,9 +39,13 @@ function pickFile() {
 describe("UploadPage quota handling (CONTRACTS.md §11, v1.17)", () => {
   it("shows a non-alarming quota banner and disables submit on 429 quota_exceeded", async () => {
     uploadDocumentMock.mockRejectedValue(
+      // used != limit deliberately (e.g. an admin lowers ANALYSIS_QUOTA_MONTHLY
+      // mid-month after a user already exceeded the new cap) -- catches the
+      // banner accidentally rendering `limit` twice instead of `used` then
+      // `limit`, which a used === limit fixture can't distinguish.
       new ApiError(429, "quota_exceeded", "Monthly analysis quota exceeded.", {
         limit: 200,
-        used: 200,
+        used: 250,
         resets_at: "2026-10-01T00:00:00+00:00",
       }),
     );
@@ -53,7 +57,7 @@ describe("UploadPage quota handling (CONTRACTS.md §11, v1.17)", () => {
     // Date order ("Oct 1" vs "1 Oct") is locale-dependent (toLocaleDateString,
     // same characteristic DashboardPage.tsx's formatDate already has) --
     // assert on the day-count clause instead of a specific date string shape.
-    await screen.findByText(/used all 200 of your 200 analyses this month/);
+    await screen.findByText(/used all 250 of your 200 analyses this month/);
     expect(screen.getByText(/resets on/)).toBeInTheDocument();
     expect(screen.getByText(/in \d+ days/)).toBeInTheDocument();
 

@@ -108,7 +108,7 @@ export function UploadPage() {
             <form onSubmit={handleSubmit} className="flex flex-col gap-4">
               {quotaInfo && (
                 <p className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
-                  You've used all {quotaInfo.limit} of your {quotaInfo.limit} analyses this month.
+                  You've used all {quotaInfo.used} of your {quotaInfo.limit} analyses this month.
                   Your quota resets on {formatResetDate(quotaInfo.resetsAt)} (
                   {daysUntil(quotaInfo.resetsAt) === 0 ? "today" : `in ${daysUntil(quotaInfo.resetsAt)} days`}
                   ).
