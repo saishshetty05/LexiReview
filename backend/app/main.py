@@ -43,6 +43,7 @@ from app.decisions import UNSET, get_decisions_for_findings, upsert_decision
 from app.jobs import create_queued_job
 from app.models import AnalysisJob, AnalysisResult, AuditLog, Document, DocumentSummary, Outbox, User
 from app.preflight import PreflightResult, run_preflight
+from app.quota import check_quota
 from app.storage import (
     DocumentNotFoundError,
     ObjectMissingError,
@@ -910,6 +911,25 @@ def upload_document(
         raise HTTPException(
             status_code=_preflight_status_code(result),
             detail={"category": "preflight_rejected", "message": result.reason},
+        )
+
+    # CONTRACTS.md §11 (v1.17): checked on the existing outer session (the
+    # one get_current_user already opened), before any of the documents/
+    # analysis_jobs/outbox rows are written below -- same "rejection writes
+    # nothing" property preflight itself just established, and no new
+    # session is needed since RLS already scopes this to the caller (same
+    # pattern as the FR-6 dedup SELECT further down).
+    quota_status = check_quota(_outer_session)
+    if quota_status.exceeded:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "category": "quota_exceeded",
+                "message": "Monthly analysis quota exceeded.",
+                "limit": quota_status.limit,
+                "used": quota_status.used,
+                "resets_at": quota_status.resets_at.isoformat(),
+            },
         )
 
     sha256_hash = result.metadata["sha256"]

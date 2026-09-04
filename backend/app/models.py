@@ -215,6 +215,27 @@ class AnalysisJob(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
+class AnalysisCost(Base):
+    """One row per real LLM provider call (analyze/summarize/entailment),
+    per CONTRACTS.md §11 (v1.17). Immutable (app_user is granted
+    INSERT/SELECT only — migration 014), same pattern as AnalysisResult.
+    The upload quota check counts COUNT(DISTINCT job_id) over this table --
+    "charged for what actually called the LLM, nothing else" -- not a state
+    read off analysis_jobs.
+    """
+
+    __tablename__ = "analysis_costs"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    job_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("analysis_jobs.id"), nullable=False)
+    user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), nullable=False)
+    call_type: Mapped[str] = mapped_column(String, nullable=False)
+    model: Mapped[str] = mapped_column(String, nullable=False)
+    input_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
+    output_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
+
+
 class Outbox(Base):
     """Transactional outbox for broker delivery, per CONTRACTS.md §1/§5 (v1.13).
 

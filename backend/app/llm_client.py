@@ -370,6 +370,26 @@ class LLMConfig:
 
 
 @dataclass(frozen=True)
+class LLMCallUsage:
+    """CONTRACTS.md §11 (v1.17): one entry per real provider call, appended
+    to LLMClient.call_log immediately after client.messages.create()
+    returns -- before response parsing, deliberately. Tokens are billed by
+    the provider the moment the response comes back, regardless of whether
+    this client can make sense of its shape afterward (ProviderResponseError
+    etc), so capturing usage must not depend on parsing succeeding. The
+    caller (worker.py) reads call_log and writes one AnalysisCost row per
+    entry; a failure to do so must never be silently invisible to quota,
+    which is why capture happens this early rather than alongside the
+    return value.
+    """
+
+    call_type: str  # "analyze" | "summarize" | "entailment"
+    model: str
+    input_tokens: int
+    output_tokens: int
+
+
+@dataclass(frozen=True)
 class EntailmentResult:
     """PRD AI-6. Mirrors verifier.VerificationResult's shape -- a bool the
     caller acts on plus the raw score for anything that wants it (logging,
@@ -389,6 +409,11 @@ class LLMClient:
 
     def __init__(self, config: LLMConfig | None = None) -> None:
         self.config = config or LLMConfig.from_env()
+        # CONTRACTS.md §11 (v1.17): accumulated across this instance's
+        # lifetime -- worker.py constructs one LLMClient per _execute_analysis/
+        # _execute_summary call and drains this after each, so it never
+        # needs resetting mid-instance.
+        self.call_log: list[LLMCallUsage] = []
 
     def _resolve_api_key(self, *, pseudonymised: bool, is_synthetic: bool) -> str:
         """Runs every CLAUDE.md rule 3 guardrail, in fixed order, and returns
@@ -485,6 +510,20 @@ class LLMClient:
             "call is wired up yet"
         )
 
+    def _log_usage(self, call_type: str, response: object) -> None:
+        """Appends to call_log immediately after messages.create() returns,
+        before any response parsing -- see LLMCallUsage's docstring for why
+        capture must not depend on the response being well-formed."""
+        usage = response.usage
+        self.call_log.append(
+            LLMCallUsage(
+                call_type=call_type,
+                model=self.config.model,
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+            )
+        )
+
     def _analyze_anthropic(
         self, blocks: list[Block], api_key: str, *, severity_examples: list[dict] | None = None
     ) -> list[dict]:
@@ -508,6 +547,7 @@ class LLMClient:
             tool_choice={"type": "tool", "name": "record_findings"},
             messages=[{"role": "user", "content": _blocks_to_prompt(blocks)}],
         )
+        self._log_usage("analyze", response)
 
         for content_block in response.content:
             if content_block.type == "tool_use" and content_block.name == "record_findings":
@@ -536,6 +576,7 @@ class LLMClient:
             tool_choice={"type": "tool", "name": "record_summary"},
             messages=[{"role": "user", "content": _blocks_to_prompt(blocks)}],
         )
+        self._log_usage("summarize", response)
 
         for content_block in response.content:
             if content_block.type == "tool_use" and content_block.name == "record_summary":
@@ -569,6 +610,7 @@ class LLMClient:
             tool_choice={"type": "tool", "name": "record_entailment"},
             messages=[{"role": "user", "content": _entailment_prompt(claim, block_texts)}],
         )
+        self._log_usage("entailment", response)
 
         for content_block in response.content:
             if content_block.type == "tool_use" and content_block.name == "record_entailment":

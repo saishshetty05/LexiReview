@@ -11,6 +11,23 @@ import { cn } from "@/lib/utils";
 
 const ACCEPTED_EXTENSIONS = [".pdf", ".docx"];
 
+interface QuotaInfo {
+  limit: number;
+  used: number;
+  resetsAt: string;
+}
+
+// CONTRACTS.md §11 (v1.17): "clear in-UI feedback", non-alarming -- a plain
+// day count, not a countdown or urgency framing.
+function daysUntil(isoString: string): number {
+  const diffMs = new Date(isoString).getTime() - Date.now();
+  return Math.max(0, Math.ceil(diffMs / (1000 * 60 * 60 * 24)));
+}
+
+function formatResetDate(isoString: string): string {
+  return new Date(isoString).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
 export function UploadPage() {
   const navigate = useNavigate();
   const uploadMutation = useUploadMutation();
@@ -20,6 +37,10 @@ export function UploadPage() {
   // Set only for the duplicate_document case, so the error banner can link
   // straight to the existing job instead of just refusing the upload.
   const [existingJobId, setExistingJobId] = useState<string | null>(null);
+  // CONTRACTS.md §11 (v1.17): quota_exceeded is a distinct, non-alarming
+  // state per the contract's own wording -- kept separate from `error`
+  // (the generic destructive banner) rather than folded into it.
+  const [quotaInfo, setQuotaInfo] = useState<QuotaInfo | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
   function pickFile(candidate: File | undefined | null) {
@@ -56,6 +77,15 @@ export function UploadPage() {
           navigate("/login", { replace: true });
           return;
         }
+        if (
+          err.category === "quota_exceeded" &&
+          typeof err.detail?.limit === "number" &&
+          typeof err.detail?.used === "number" &&
+          typeof err.detail?.resets_at === "string"
+        ) {
+          setQuotaInfo({ limit: err.detail.limit, used: err.detail.used, resetsAt: err.detail.resets_at });
+          return;
+        }
         setError(err.message);
         if (err.category === "duplicate_document" && typeof err.detail?.job_id === "string") {
           setExistingJobId(err.detail.job_id);
@@ -76,6 +106,15 @@ export function UploadPage() {
           </CardHeader>
           <CardContent>
             <form onSubmit={handleSubmit} className="flex flex-col gap-4">
+              {quotaInfo && (
+                <p className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">
+                  You've used all {quotaInfo.limit} of your {quotaInfo.limit} analyses this month.
+                  Your quota resets on {formatResetDate(quotaInfo.resetsAt)} (
+                  {daysUntil(quotaInfo.resetsAt) === 0 ? "today" : `in ${daysUntil(quotaInfo.resetsAt)} days`}
+                  ).
+                </p>
+              )}
+
               {error && (
                 <p className="rounded-md border border-destructive/30 bg-destructive/10 p-2 text-sm text-destructive">
                   {error}
@@ -142,7 +181,11 @@ export function UploadPage() {
                 />
               </div>
 
-              <Button type="submit" disabled={uploadMutation.isPending || !file} className="w-full">
+              <Button
+                type="submit"
+                disabled={uploadMutation.isPending || !file || quotaInfo !== null}
+                className="w-full"
+              >
                 {uploadMutation.isPending ? "Uploading..." : "Analyze document"}
               </Button>
             </form>

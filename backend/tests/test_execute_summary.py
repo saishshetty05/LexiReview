@@ -74,6 +74,14 @@ def cleanup_rows(pg_owner_engine):
             {"ids": created_user_ids},
         )
         conn.execute(
+            text("DELETE FROM analysis_costs WHERE user_id = ANY(:ids)"),
+            {"ids": created_user_ids},
+        )
+        conn.execute(
+            text("DELETE FROM analysis_jobs WHERE user_id = ANY(:ids)"),
+            {"ids": created_user_ids},
+        )
+        conn.execute(
             text("DELETE FROM documents WHERE user_id = ANY(:ids)"), {"ids": created_user_ids}
         )
         conn.execute(text("DELETE FROM users WHERE id = ANY(:ids)"), {"ids": created_user_ids})
@@ -96,8 +104,14 @@ def _make_job(*, user_id: uuid.UUID, doc_id: uuid.UUID, doc_version_hash: str) -
 def _stub_llm_client(monkeypatch, model: str = "claude-test-model") -> None:
     from types import SimpleNamespace
 
+    # call_log is a real (mutable) list, not a stub value: _persist_cost_log
+    # (CONTRACTS.md §11) reads it after run_summary returns/raises, and a
+    # fake run_summary that wants to simulate a real provider call can
+    # append to it directly.
     monkeypatch.setattr(
-        worker, "LLMClient", lambda: SimpleNamespace(config=SimpleNamespace(model=model))
+        worker,
+        "LLMClient",
+        lambda: SimpleNamespace(config=SimpleNamespace(model=model), call_log=[]),
     )
 
 
@@ -287,3 +301,148 @@ def test_execute_summary_writes_no_row_when_it_fails(
         rows = conn.execute(text("SELECT id FROM document_summaries")).fetchall()
         conn.rollback()
     assert rows == []
+
+
+# ── CONTRACTS.md §11 (v1.17): cost-log persistence ──────────────────────
+
+
+def _insert_real_job(
+    pg_owner_engine, *, user_id: uuid.UUID, doc_id: uuid.UUID, doc_version_hash: str
+) -> AnalysisJob:
+    """Unlike this file's plain in-memory _make_job (normally enough, per
+    the module docstring, since _execute_summary never itself queries/
+    writes analysis_jobs) -- analysis_costs.job_id is a real FK, so the
+    cost-log tests below need a real row for the write to actually succeed
+    rather than silently no-op inside _persist_cost_log's broad except.
+    """
+    job_id = uuid.uuid4()
+    with pg_owner_engine.connect() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO analysis_jobs "
+                "(id, user_id, doc_id, doc_version_hash, state, retry_count, created_at, started_at) "
+                "VALUES (:id, :user_id, :doc_id, :hash, 'running', 0, now(), now())"
+            ),
+            {"id": job_id, "user_id": user_id, "doc_id": doc_id, "hash": doc_version_hash},
+        )
+        conn.commit()
+    return AnalysisJob(
+        id=job_id, user_id=user_id, doc_id=doc_id, doc_version_hash=doc_version_hash,
+        state=JobState.RUNNING.value,
+    )
+
+
+def _cost_rows(pg_app_engine, user_id: uuid.UUID):
+    with pg_app_engine.connect() as conn:
+        conn.execute(text(f"SET LOCAL app.user_id = '{user_id}'"))
+        rows = conn.execute(
+            text("SELECT job_id, call_type, input_tokens, output_tokens FROM analysis_costs")
+        ).fetchall()
+        conn.rollback()
+    return rows
+
+
+def test_execute_summary_persists_cost_log(pg_owner_engine, pg_app_engine, cleanup_rows, monkeypatch):
+    from app.llm_client import LLMCallUsage
+
+    user_id, doc_id = uuid.uuid4(), uuid.uuid4()
+    doc_version_hash = "hash-execute-summary-cost-log"
+    cleanup_rows.append(user_id)
+    _insert_user(pg_owner_engine, user_id)
+    _insert_document(
+        pg_owner_engine, user_id=user_id, doc_id=doc_id, doc_version_hash=doc_version_hash
+    )
+    job = _insert_real_job(
+        pg_owner_engine, user_id=user_id, doc_id=doc_id, doc_version_hash=doc_version_hash
+    )
+    job_id = job.id
+
+    def _fake_run_summary(file_bytes, file_type, llm_client, findings, *, is_synthetic):
+        llm_client.call_log.append(
+            LLMCallUsage(call_type="summarize", model="claude-test", input_tokens=200, output_tokens=80)
+        )
+        return dict(SUMMARY_PAYLOAD)
+
+    monkeypatch.setattr(worker, "fetch_document", lambda *a, **k: b"bytes")
+    monkeypatch.setattr(worker, "run_summary", _fake_run_summary)
+    _stub_llm_client(monkeypatch)
+
+    worker._execute_summary(job, FINDINGS)
+
+    rows = _cost_rows(pg_app_engine, user_id)
+    assert len(rows) == 1
+    assert rows[0].call_type == "summarize"
+    assert str(rows[0].job_id) == str(job_id)
+    assert rows[0].input_tokens == 200
+
+
+def test_execute_summary_persists_cost_log_even_when_run_summary_raises(
+    pg_owner_engine, pg_app_engine, cleanup_rows, monkeypatch
+):
+    """Mirrors test_execute_analysis_persists_cost_log_even_on_transient_failure
+    for the summarize side of the identical finally-block wiring in
+    _execute_summary: a call that bills tokens and then raises (the model
+    key isn't configured, a malformed response, etc) must still be counted.
+    _execute_summary itself never re-raises -- it converts any failure to a
+    formatted error string -- but the cost row must persist regardless of
+    that outcome.
+    """
+    from app.llm_client import LLMCallUsage
+
+    user_id, doc_id = uuid.uuid4(), uuid.uuid4()
+    doc_version_hash = "hash-execute-summary-cost-log-failure"
+    cleanup_rows.append(user_id)
+    _insert_user(pg_owner_engine, user_id)
+    _insert_document(
+        pg_owner_engine, user_id=user_id, doc_id=doc_id, doc_version_hash=doc_version_hash
+    )
+    job = _insert_real_job(
+        pg_owner_engine, user_id=user_id, doc_id=doc_id, doc_version_hash=doc_version_hash
+    )
+
+    def _fake_run_summary(file_bytes, file_type, llm_client, findings, *, is_synthetic):
+        llm_client.call_log.append(
+            LLMCallUsage(call_type="summarize", model="claude-test", input_tokens=150, output_tokens=30)
+        )
+        raise RuntimeError("provider replied but response parsing failed")
+
+    monkeypatch.setattr(worker, "fetch_document", lambda *a, **k: b"bytes")
+    monkeypatch.setattr(worker, "run_summary", _fake_run_summary)
+    _stub_llm_client(monkeypatch)
+
+    result = worker._execute_summary(job, FINDINGS)
+
+    assert result is not None
+    assert result.startswith("summary_generation_error: ")
+    rows = _cost_rows(pg_app_engine, user_id)
+    assert len(rows) == 1
+    assert rows[0].call_type == "summarize"
+    assert rows[0].input_tokens == 150
+
+
+def test_execute_summary_writes_no_cost_rows_when_call_log_empty(
+    pg_owner_engine, pg_app_engine, cleanup_rows, monkeypatch
+):
+    """A guardrail refusal, or any failure before a real provider call, is
+    never appended to call_log -- must write zero rows, never a placeholder."""
+    user_id, doc_id = uuid.uuid4(), uuid.uuid4()
+    doc_version_hash = "hash-execute-summary-cost-log-empty"
+    cleanup_rows.append(user_id)
+    _insert_user(pg_owner_engine, user_id)
+    _insert_document(
+        pg_owner_engine, user_id=user_id, doc_id=doc_id, doc_version_hash=doc_version_hash
+    )
+    job = _insert_real_job(
+        pg_owner_engine, user_id=user_id, doc_id=doc_id, doc_version_hash=doc_version_hash
+    )
+
+    def _raise(*a, **k):
+        raise ProviderNotConfiguredError("anthropic")
+
+    monkeypatch.setattr(worker, "fetch_document", lambda *a, **k: b"bytes")
+    monkeypatch.setattr(worker, "run_summary", _raise)
+    _stub_llm_client(monkeypatch)
+
+    worker._execute_summary(job, FINDINGS)
+
+    assert _cost_rows(pg_app_engine, user_id) == []

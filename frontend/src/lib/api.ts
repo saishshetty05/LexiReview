@@ -57,6 +57,11 @@ const CATEGORY_MESSAGES: Record<string, string> = {
   mfa_rate_limited: "Too many failed attempts. Please wait a few minutes and try again.",
   account_suspended: "This account has been suspended.",
   admin_required: "You don't have permission to view this page.",
+  // CONTRACTS.md §11 (v1.17): fallback only -- upload_document always sends
+  // its own message, and UploadPage builds a richer banner from
+  // limit/used/resets_at directly, but every category still gets an entry
+  // here (the exact gap #70's review caught for MFA).
+  quota_exceeded: "Monthly analysis quota exceeded.",
   user_not_found: "That user no longer exists.",
   cannot_self_suspend: "You can't suspend your own account.",
 };
