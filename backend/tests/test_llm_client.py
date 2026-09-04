@@ -139,9 +139,18 @@ class _FakeAnthropicClient:
         self.messages = _FakeAnthropicMessages(response)
 
 
-def _tool_use_response(findings) -> SimpleNamespace:
+def _usage(input_tokens: int = 100, output_tokens: int = 50) -> SimpleNamespace:
+    """CONTRACTS.md §11 (v1.17): every real provider response carries a
+    usage block, read by LLMClient._log_usage before any content parsing
+    -- every fake response below needs one, including the malformed/empty
+    ones, since usage capture must not depend on parsing succeeding."""
+    return SimpleNamespace(input_tokens=input_tokens, output_tokens=output_tokens)
+
+
+def _tool_use_response(findings, usage: SimpleNamespace | None = None) -> SimpleNamespace:
     return SimpleNamespace(
-        content=[SimpleNamespace(type="tool_use", name="record_findings", input={"findings": findings})]
+        content=[SimpleNamespace(type="tool_use", name="record_findings", input={"findings": findings})],
+        usage=usage or _usage(),
     )
 
 
@@ -247,7 +256,7 @@ def test_anthropic_analyze_system_prompt_includes_severity_examples(monkeypatch)
 
 def test_anthropic_analyze_raises_on_missing_tool_use_block(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-test")
-    empty_response = SimpleNamespace(content=[])
+    empty_response = SimpleNamespace(content=[], usage=_usage())
     monkeypatch.setattr(
         llm_client.anthropic, "Anthropic", lambda **kwargs: _FakeAnthropicClient(response=empty_response)
     )
@@ -256,12 +265,16 @@ def test_anthropic_analyze_raises_on_missing_tool_use_block(monkeypatch):
     with pytest.raises(LLMClientError) as exc_info:
         client.analyze([], pseudonymised=True, is_synthetic=False)
     assert exc_info.value.category == "provider_response_invalid"
+    # CONTRACTS.md §11: tokens were billed the moment this response came
+    # back, regardless of it being unparseable -- usage must still be logged.
+    assert len(client.call_log) == 1
 
 
 def test_anthropic_analyze_raises_on_non_list_findings(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-test")
     bad_response = SimpleNamespace(
-        content=[SimpleNamespace(type="tool_use", name="record_findings", input={"findings": "not-a-list"})]
+        content=[SimpleNamespace(type="tool_use", name="record_findings", input={"findings": "not-a-list"})],
+        usage=_usage(),
     )
     monkeypatch.setattr(
         llm_client.anthropic, "Anthropic", lambda **kwargs: _FakeAnthropicClient(response=bad_response)
@@ -271,6 +284,30 @@ def test_anthropic_analyze_raises_on_non_list_findings(monkeypatch):
     with pytest.raises(LLMClientError) as exc_info:
         client.analyze([], pseudonymised=True, is_synthetic=False)
     assert exc_info.value.category == "provider_response_invalid"
+    assert len(client.call_log) == 1
+
+
+def test_anthropic_analyze_logs_usage_to_call_log(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-test")
+    monkeypatch.setattr(
+        llm_client.anthropic,
+        "Anthropic",
+        lambda **kwargs: _FakeAnthropicClient(response=_tool_use_response([], _usage(123, 45))),
+    )
+
+    client = LLMClient(_config(provider="anthropic", model="claude-haiku", synthetic_only=False))
+    client.analyze([], pseudonymised=True, is_synthetic=False)
+
+    assert client.call_log == [
+        llm_client.LLMCallUsage(
+            call_type="analyze", model="claude-haiku", input_tokens=123, output_tokens=45
+        )
+    ]
+
+
+def test_llm_client_call_log_starts_empty():
+    client = LLMClient(_config())
+    assert client.call_log == []
 
 
 # ── summarize() ──────────────────────────────────────────────────────────
@@ -299,7 +336,9 @@ def test_summarize_missing_api_key_raises_not_configured(monkeypatch):
         client.summarize([], pseudonymised=True, is_synthetic=False)
 
 
-def _summary_tool_use_response(overview: str, key_terms: list[dict]) -> SimpleNamespace:
+def _summary_tool_use_response(
+    overview: str, key_terms: list[dict], usage: SimpleNamespace | None = None
+) -> SimpleNamespace:
     return SimpleNamespace(
         content=[
             SimpleNamespace(
@@ -307,7 +346,8 @@ def _summary_tool_use_response(overview: str, key_terms: list[dict]) -> SimpleNa
                 name="record_summary",
                 input={"overview": overview, "key_terms": key_terms},
             )
-        ]
+        ],
+        usage=usage or _usage(),
     )
 
 
@@ -355,7 +395,7 @@ def test_anthropic_summarize_uses_expected_call_params(monkeypatch):
 
 def test_anthropic_summarize_raises_on_missing_tool_use_block(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-test")
-    empty_response = SimpleNamespace(content=[])
+    empty_response = SimpleNamespace(content=[], usage=_usage())
     monkeypatch.setattr(
         llm_client.anthropic, "Anthropic", lambda **kwargs: _FakeAnthropicClient(response=empty_response)
     )
@@ -364,6 +404,7 @@ def test_anthropic_summarize_raises_on_missing_tool_use_block(monkeypatch):
     with pytest.raises(LLMClientError) as exc_info:
         client.summarize([], pseudonymised=True, is_synthetic=False)
     assert exc_info.value.category == "provider_response_invalid"
+    assert len(client.call_log) == 1
 
 
 def test_anthropic_summarize_raises_on_malformed_shape(monkeypatch):
@@ -371,7 +412,8 @@ def test_anthropic_summarize_raises_on_malformed_shape(monkeypatch):
     bad_response = SimpleNamespace(
         content=[
             SimpleNamespace(type="tool_use", name="record_summary", input={"overview": 123, "key_terms": []})
-        ]
+        ],
+        usage=_usage(),
     )
     monkeypatch.setattr(
         llm_client.anthropic, "Anthropic", lambda **kwargs: _FakeAnthropicClient(response=bad_response)
@@ -381,6 +423,25 @@ def test_anthropic_summarize_raises_on_malformed_shape(monkeypatch):
     with pytest.raises(LLMClientError) as exc_info:
         client.summarize([], pseudonymised=True, is_synthetic=False)
     assert exc_info.value.category == "provider_response_invalid"
+    assert len(client.call_log) == 1
+
+
+def test_anthropic_summarize_logs_usage_to_call_log(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-test")
+    monkeypatch.setattr(
+        llm_client.anthropic,
+        "Anthropic",
+        lambda **kwargs: _FakeAnthropicClient(response=_summary_tool_use_response("x", [], _usage(200, 80))),
+    )
+
+    client = LLMClient(_config(provider="anthropic", model="claude-haiku", synthetic_only=False))
+    client.summarize([], pseudonymised=True, is_synthetic=False)
+
+    assert client.call_log == [
+        llm_client.LLMCallUsage(
+            call_type="summarize", model="claude-haiku", input_tokens=200, output_tokens=80
+        )
+    ]
 
 
 @pytest.mark.parametrize(
@@ -594,3 +655,115 @@ def test_analyze_high_inconsistency_when_subordination_target_does_not_resolve(m
         and set(finding["block_ids"]) == {"BLOCK_1", "BLOCK_22"}
     ]
     assert len(high_inconsistency_for_pair) == 1
+
+
+# ── check_entailment() ───────────────────────────────────────────────────
+# PRD AI-6. Previously had no direct fake-anthropic-client coverage (only
+# exercised indirectly through analysis_pipeline.py's duck-typed
+# _FakeLLMClient, which never touches _check_entailment_anthropic itself).
+
+
+def _entailment_tool_use_response(score: float, usage: SimpleNamespace | None = None) -> SimpleNamespace:
+    return SimpleNamespace(
+        content=[
+            SimpleNamespace(type="tool_use", name="record_entailment", input={"support_score": score})
+        ],
+        usage=usage or _usage(),
+    )
+
+
+def test_anthropic_check_entailment_returns_result_from_tool_use(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-test")
+    monkeypatch.setattr(
+        llm_client.anthropic,
+        "Anthropic",
+        lambda **kwargs: _FakeAnthropicClient(response=_entailment_tool_use_response(0.9)),
+    )
+
+    client = LLMClient(_config(provider="anthropic", synthetic_only=False))
+    result = client.check_entailment(
+        "claim text", ["block text"], pseudonymised=True, is_synthetic=False
+    )
+
+    assert result.score == 0.9
+    assert result.supported is True
+
+
+def test_anthropic_check_entailment_below_threshold_not_supported(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-test")
+    monkeypatch.setattr(
+        llm_client.anthropic,
+        "Anthropic",
+        lambda **kwargs: _FakeAnthropicClient(response=_entailment_tool_use_response(0.1)),
+    )
+
+    client = LLMClient(_config(provider="anthropic", synthetic_only=False))
+    result = client.check_entailment(
+        "claim text", ["block text"], pseudonymised=True, is_synthetic=False
+    )
+
+    assert result.supported is False
+
+
+def test_anthropic_check_entailment_raises_on_missing_tool_use_block(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-test")
+    empty_response = SimpleNamespace(content=[], usage=_usage())
+    monkeypatch.setattr(
+        llm_client.anthropic, "Anthropic", lambda **kwargs: _FakeAnthropicClient(response=empty_response)
+    )
+
+    client = LLMClient(_config(provider="anthropic", synthetic_only=False))
+    with pytest.raises(LLMClientError) as exc_info:
+        client.check_entailment("claim", ["block"], pseudonymised=True, is_synthetic=False)
+    assert exc_info.value.category == "provider_response_invalid"
+    # Same principle as analyze/summarize: usage is billed the moment the
+    # response comes back, regardless of it being unparseable.
+    assert len(client.call_log) == 1
+
+
+def test_anthropic_check_entailment_logs_usage_to_call_log(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-test")
+    monkeypatch.setattr(
+        llm_client.anthropic,
+        "Anthropic",
+        lambda **kwargs: _FakeAnthropicClient(
+            response=_entailment_tool_use_response(0.85, _usage(30, 10))
+        ),
+    )
+
+    client = LLMClient(_config(provider="anthropic", model="claude-haiku", synthetic_only=False))
+    client.check_entailment("claim", ["block"], pseudonymised=True, is_synthetic=False)
+
+    assert client.call_log == [
+        llm_client.LLMCallUsage(
+            call_type="entailment", model="claude-haiku", input_tokens=30, output_tokens=10
+        )
+    ]
+
+
+def test_call_log_accumulates_across_multiple_calls_on_same_client(monkeypatch):
+    """A single LLMClient instance (as worker.py constructs one per
+    _execute_analysis call) accumulates one entry per real provider call --
+    analyze() plus N entailment() calls in this scenario, matching
+    CONTRACTS.md §11's "up to three call types per job" description."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "fake-key-for-test")
+    responses = iter(
+        [
+            _tool_use_response([], _usage(100, 20)),
+            _entailment_tool_use_response(0.9, _usage(10, 5)),
+            _entailment_tool_use_response(0.4, _usage(12, 6)),
+        ]
+    )
+    monkeypatch.setattr(
+        llm_client.anthropic,
+        "Anthropic",
+        lambda **kwargs: _FakeAnthropicClient(response=next(responses)),
+    )
+
+    client = LLMClient(_config(provider="anthropic", model="claude-haiku", synthetic_only=False))
+    client.analyze([], pseudonymised=True, is_synthetic=False)
+    client.check_entailment("claim1", ["block1"], pseudonymised=True, is_synthetic=False)
+    client.check_entailment("claim2", ["block2"], pseudonymised=True, is_synthetic=False)
+
+    assert [entry.call_type for entry in client.call_log] == ["analyze", "entailment", "entailment"]
+    assert [entry.input_tokens for entry in client.call_log] == [100, 10, 12]

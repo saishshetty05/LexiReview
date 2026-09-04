@@ -1,4 +1,5 @@
 """Celery worker — Person B extends this per SETUP_GUIDE.md Phase 5."""
+import logging
 import os
 import uuid
 
@@ -15,7 +16,7 @@ from app.jobs import (
     get_active_job, mark_failed, mark_running, mark_succeeded, mark_transient_failure,
 )
 from app.llm_client import LLMClient, LLMClientError, ProviderResponseError
-from app.models import AnalysisJob, AnalysisResult, Document, DocumentSummary, JobState
+from app.models import AnalysisCost, AnalysisJob, AnalysisResult, Document, DocumentSummary, JobState
 from app.storage import fetch_document
 
 # Anthropic errors that survive the SDK's own internal retry budget (see
@@ -37,6 +38,8 @@ _TRANSIENT_LLM_ERRORS = (
     anthropic.OverloadedError,
     ProviderResponseError,
 )
+
+logger = logging.getLogger(__name__)
 
 celery_app = Celery("lexireview", broker=os.environ.get("REDIS_URL", "redis://redis:6379/0"),
                     backend=os.environ.get("REDIS_URL", "redis://redis:6379/0"))
@@ -62,6 +65,43 @@ def relay_sweep_outbox() -> None:
     from app.relay import sweep_outbox
 
     sweep_outbox()
+
+
+def _persist_cost_log(job: AnalysisJob, llm_client: LLMClient) -> None:
+    """CONTRACTS.md §11 (v1.17): writes one AnalysisCost row per entry in
+    llm_client.call_log. Must run on every path -- success, a transient
+    failure that gets converted and re-raised, or an unexpected exception --
+    since LLMCallUsage is appended immediately after messages.create()
+    returns, before any parsing that could fail: by the time call_log has
+    entries, the provider has already billed those tokens regardless of
+    what happens to the job afterward. Skipped entirely when call_log is
+    empty (no provider call was ever made -- a guardrail refusal, a fetch
+    failure before any LLM call, etc), so this never writes a zero-usage
+    row.
+
+    A write failure here must not affect the job's own outcome -- same
+    annotate-never-fail principle as _execute_summary's own error handling.
+    """
+    if not llm_client.call_log:
+        return
+    try:
+        with app_user_session(job.user_id) as session:
+            for entry in llm_client.call_log:
+                session.add(
+                    AnalysisCost(
+                        job_id=job.id,
+                        user_id=job.user_id,
+                        call_type=entry.call_type,
+                        model=entry.model,
+                        input_tokens=entry.input_tokens,
+                        output_tokens=entry.output_tokens,
+                    )
+                )
+    except Exception:
+        # Metadata only (CLAUDE.md rule 2: job_id, no document content) --
+        # a cost-log write failure must not affect the job's own outcome,
+        # but it shouldn't be silently invisible either.
+        logger.warning("failed to persist cost log for job_id=%s", job.id, exc_info=True)
 
 
 def _execute_analysis(job: AnalysisJob) -> list[dict]:
@@ -104,15 +144,21 @@ def _execute_analysis(job: AnalysisJob) -> list[dict]:
 
     llm_client = LLMClient()
     try:
-        findings = run_analysis(
-            file_bytes,
-            file_type,
-            llm_client,
-            is_synthetic=is_synthetic,
-            severity_examples=severity_examples,
-        )
-    except _TRANSIENT_LLM_ERRORS as exc:
-        raise TransientAnalysisError("llm_provider_error", type(exc).__name__) from exc
+        try:
+            findings = run_analysis(
+                file_bytes,
+                file_type,
+                llm_client,
+                is_synthetic=is_synthetic,
+                severity_examples=severity_examples,
+            )
+        except _TRANSIENT_LLM_ERRORS as exc:
+            raise TransientAnalysisError("llm_provider_error", type(exc).__name__) from exc
+    finally:
+        # Runs on every path -- success, a transient error re-raised above,
+        # or anything else propagating unexpected -- see _persist_cost_log's
+        # docstring for why this can't be scoped to only the happy path.
+        _persist_cost_log(job, llm_client)
 
     with app_user_session(job.user_id) as session:
         for finding in findings:
@@ -168,9 +214,15 @@ def _execute_summary(job: AnalysisJob, findings: list[dict]) -> str | None:
 
         file_bytes = fetch_document(job.doc_id, job.user_id, job.doc_version_hash)
         llm_client = LLMClient()
-        payload = run_summary(
-            file_bytes, file_type, llm_client, findings, is_synthetic=is_synthetic
-        )
+        try:
+            payload = run_summary(
+                file_bytes, file_type, llm_client, findings, is_synthetic=is_synthetic
+            )
+        finally:
+            # Same "must run on every path" reasoning as _execute_analysis's
+            # identical finally -- tokens are billed the moment the summarize
+            # call returns, whether or not run_summary goes on to raise.
+            _persist_cost_log(job, llm_client)
 
         with app_user_session(job.user_id) as session:
             session.add(

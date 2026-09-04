@@ -86,6 +86,10 @@ def cleanup_rows(pg_owner_engine):
     yield created_user_ids
     with pg_owner_engine.connect() as conn:
         conn.execute(
+            text("DELETE FROM analysis_costs WHERE user_id = ANY(:ids)"),
+            {"ids": created_user_ids},
+        )
+        conn.execute(
             text("DELETE FROM analysis_jobs WHERE user_id = ANY(:ids)"),
             {"ids": created_user_ids},
         )
@@ -165,6 +169,105 @@ def test_upload_preflight_rejection_writes_nothing(pg_owner_engine, cleanup_rows
     assert doc_count == 0
     assert job_count == 0
     assert recorded_tasks() == []
+
+
+# ── CONTRACTS.md §11 (v1.17): monthly quota enforcement ───────────────────
+
+
+def _seed_used_quota(pg_owner_engine, *, user_id: uuid.UUID, count: int) -> None:
+    """Seeds `count` distinct (job, analysis_costs row) pairs this UTC
+    month for `user_id` -- simulates jobs that already made a real LLM
+    provider call, the thing check_quota's COUNT(DISTINCT job_id) counts.
+    """
+    with pg_owner_engine.connect() as conn:
+        for _ in range(count):
+            job_id, doc_id = uuid.uuid4(), uuid.uuid4()
+            conn.execute(
+                text(
+                    "INSERT INTO analysis_jobs "
+                    "(id, user_id, doc_id, doc_version_hash, state, retry_count, created_at) "
+                    "VALUES (:id, :uid, :doc_id, 'seed-hash', 'succeeded', 0, now())"
+                ),
+                {"id": job_id, "uid": user_id, "doc_id": doc_id},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO analysis_costs "
+                    "(id, job_id, user_id, call_type, model, input_tokens, output_tokens, created_at) "
+                    "VALUES (:id, :job_id, :uid, 'analyze', 'claude-test', 10, 5, now())"
+                ),
+                {"id": uuid.uuid4(), "job_id": job_id, "uid": user_id},
+            )
+        conn.commit()
+
+
+def test_upload_returns_429_when_quota_exceeded_and_writes_nothing(
+    pg_owner_engine, cleanup_rows, s3_env, recorded_tasks, monkeypatch
+):
+    monkeypatch.setenv("ANALYSIS_QUOTA_MONTHLY", "2")
+    user_id, auth_cookies = _register_user(pg_owner_engine)
+    cleanup_rows.append(user_id)
+    _seed_used_quota(pg_owner_engine, user_id=user_id, count=2)
+
+    resp = client.post(
+        "/documents/upload",
+        cookies=auth_cookies,
+        files={"file": ("lease.pdf", io.BytesIO(_valid_pdf_bytes()), "application/pdf")},
+    )
+
+    assert resp.status_code == 429, resp.text
+    detail = resp.json()["detail"]
+    assert detail["category"] == "quota_exceeded"
+    assert detail["limit"] == 2
+    assert detail["used"] == 2
+    assert "resets_at" in detail
+
+    # Same "rejection writes nothing" property as preflight rejection --
+    # only the 2 seeded jobs exist, nothing new from this rejected upload.
+    with pg_owner_engine.connect() as conn:
+        doc_count = conn.execute(
+            text("SELECT count(*) FROM documents WHERE user_id = :id"), {"id": user_id}
+        ).scalar_one()
+        job_count = conn.execute(
+            text("SELECT count(*) FROM analysis_jobs WHERE user_id = :id"), {"id": user_id}
+        ).scalar_one()
+    assert doc_count == 0
+    assert job_count == 2  # the seeded rows only
+    assert recorded_tasks() == []
+
+
+def test_upload_succeeds_one_below_quota_limit(
+    pg_owner_engine, cleanup_rows, s3_env, recorded_tasks, monkeypatch
+):
+    monkeypatch.setenv("ANALYSIS_QUOTA_MONTHLY", "2")
+    user_id, auth_cookies = _register_user(pg_owner_engine)
+    cleanup_rows.append(user_id)
+    _seed_used_quota(pg_owner_engine, user_id=user_id, count=1)
+
+    resp = client.post(
+        "/documents/upload",
+        cookies=auth_cookies,
+        files={"file": ("lease.pdf", io.BytesIO(_valid_pdf_bytes()), "application/pdf")},
+    )
+
+    assert resp.status_code == 201, resp.text
+
+
+def test_upload_quota_default_is_200_when_env_unset(
+    pg_owner_engine, cleanup_rows, s3_env, recorded_tasks, monkeypatch
+):
+    monkeypatch.delenv("ANALYSIS_QUOTA_MONTHLY", raising=False)
+    user_id, auth_cookies = _register_user(pg_owner_engine)
+    cleanup_rows.append(user_id)
+    # Nowhere near 200 -- just confirms the default doesn't reject a normal upload.
+
+    resp = client.post(
+        "/documents/upload",
+        cookies=auth_cookies,
+        files={"file": ("lease.pdf", io.BytesIO(_valid_pdf_bytes()), "application/pdf")},
+    )
+
+    assert resp.status_code == 201, resp.text
 
 
 def test_upload_duplicate_sha256_returns_409_with_existing_doc_id(

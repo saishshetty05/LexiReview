@@ -86,6 +86,10 @@ def cleanup_rows(pg_owner_engine):
             {"ids": created_user_ids},
         )
         conn.execute(
+            text("DELETE FROM analysis_costs WHERE user_id = ANY(:ids)"),
+            {"ids": created_user_ids},
+        )
+        conn.execute(
             text("DELETE FROM analysis_jobs WHERE user_id = ANY(:ids)"),
             {"ids": created_user_ids},
         )
@@ -132,11 +136,16 @@ def _make_job(
 def _stub_llm_client(monkeypatch) -> None:
     """_execute_analysis constructs LLMClient() before calling run_analysis,
     which normally requires LLM_PROVIDER/LLM_MODEL to be set (LLMConfig.from_env).
-    These tests fake run_analysis entirely, so the LLMClient instance itself
-    is never used -- stub the constructor too rather than depend on real env
-    config that CI has no reason to set just for these tests.
+    These tests fake run_analysis entirely, so the real provider machinery is
+    never used -- stub the constructor too rather than depend on real env
+    config that CI has no reason to set just for these tests. call_log is a
+    real (mutable) list, not a stub value: _persist_cost_log (CONTRACTS.md
+    §11) reads it after run_analysis returns/raises, and a fake run_analysis
+    that wants to simulate a real provider call can append to it directly.
     """
-    monkeypatch.setattr(worker, "LLMClient", lambda: object())
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(worker, "LLMClient", lambda: SimpleNamespace(call_log=[]))
 
 
 FINDING = {
@@ -376,3 +385,118 @@ def test_execute_analysis_does_not_wrap_guardrail_refusals(
     job = _make_job(pg_owner_engine, user_id=user_id, doc_id=doc_id, doc_version_hash=doc_version_hash)
     with pytest.raises(type(exc)):
         worker._execute_analysis(job)
+
+
+# ── CONTRACTS.md §11 (v1.17): cost-log persistence ──────────────────────
+
+
+def _cost_rows(pg_app_engine, user_id: uuid.UUID):
+    with pg_app_engine.connect() as conn:
+        conn.execute(text(f"SET LOCAL app.user_id = '{user_id}'"))
+        rows = conn.execute(
+            text(
+                "SELECT job_id, call_type, model, input_tokens, output_tokens "
+                "FROM analysis_costs"
+            )
+        ).fetchall()
+        conn.rollback()
+    return rows
+
+
+def test_execute_analysis_persists_cost_log_on_success(
+    pg_owner_engine, pg_app_engine, cleanup_rows, monkeypatch
+):
+    from app.llm_client import LLMCallUsage
+
+    user_id, doc_id = uuid.uuid4(), uuid.uuid4()
+    doc_version_hash = "hash-cost-log-success"
+    cleanup_rows.append(user_id)
+    _insert_user(pg_owner_engine, user_id)
+    _insert_document(
+        pg_owner_engine, user_id=user_id, doc_id=doc_id, doc_version_hash=doc_version_hash
+    )
+
+    def _fake_run_analysis(file_bytes, file_type, llm_client, *, is_synthetic, severity_examples=None):
+        llm_client.call_log.append(
+            LLMCallUsage(call_type="analyze", model="claude-test", input_tokens=100, output_tokens=20)
+        )
+        llm_client.call_log.append(
+            LLMCallUsage(call_type="entailment", model="claude-test", input_tokens=10, output_tokens=5)
+        )
+        return [dict(FINDING)]
+
+    monkeypatch.setattr(worker, "fetch_document", lambda *a, **k: b"bytes")
+    monkeypatch.setattr(worker, "run_analysis", _fake_run_analysis)
+    _stub_llm_client(monkeypatch)
+
+    job = _make_job(pg_owner_engine, user_id=user_id, doc_id=doc_id, doc_version_hash=doc_version_hash)
+    worker._execute_analysis(job)
+
+    rows = _cost_rows(pg_app_engine, user_id)
+    assert len(rows) == 2
+    assert {r.call_type for r in rows} == {"analyze", "entailment"}
+    assert all(str(r.job_id) == str(job.id) for r in rows)
+
+
+def test_execute_analysis_persists_cost_log_even_on_transient_failure(
+    pg_owner_engine, pg_app_engine, cleanup_rows, monkeypatch
+):
+    """The count-semantics rule in CONTRACTS.md §11 depends on this: real
+    provider spend must be captured even when the call that spent it ends
+    up raising (ProviderResponseError -- the response came back and tokens
+    were billed, but the shape didn't parse). Without this, a job that
+    burns real tokens and then exhausts retries would leak quota: real
+    spend, zero analysis_costs rows, silently uncounted.
+    """
+    from app.llm_client import LLMCallUsage
+
+    user_id, doc_id = uuid.uuid4(), uuid.uuid4()
+    doc_version_hash = "hash-cost-log-transient"
+    cleanup_rows.append(user_id)
+    _insert_user(pg_owner_engine, user_id)
+    _insert_document(
+        pg_owner_engine, user_id=user_id, doc_id=doc_id, doc_version_hash=doc_version_hash
+    )
+
+    def _fake_run_analysis(file_bytes, file_type, llm_client, *, is_synthetic, severity_examples=None):
+        llm_client.call_log.append(
+            LLMCallUsage(call_type="analyze", model="claude-test", input_tokens=100, output_tokens=20)
+        )
+        raise ProviderResponseError("record_findings.findings was not a list")
+
+    monkeypatch.setattr(worker, "fetch_document", lambda *a, **k: b"bytes")
+    monkeypatch.setattr(worker, "run_analysis", _fake_run_analysis)
+    _stub_llm_client(monkeypatch)
+
+    job = _make_job(pg_owner_engine, user_id=user_id, doc_id=doc_id, doc_version_hash=doc_version_hash)
+    with pytest.raises(TransientAnalysisError):
+        worker._execute_analysis(job)
+
+    rows = _cost_rows(pg_app_engine, user_id)
+    assert len(rows) == 1
+    assert rows[0].call_type == "analyze"
+    assert rows[0].input_tokens == 100
+
+
+def test_execute_analysis_writes_no_cost_rows_when_call_log_empty(
+    pg_owner_engine, pg_app_engine, cleanup_rows, monkeypatch
+):
+    """A guardrail refusal, or any failure before a real provider call, is
+    never appended to call_log -- must write zero rows, never a
+    zero-usage placeholder row."""
+    user_id, doc_id = uuid.uuid4(), uuid.uuid4()
+    doc_version_hash = "hash-cost-log-empty"
+    cleanup_rows.append(user_id)
+    _insert_user(pg_owner_engine, user_id)
+    _insert_document(
+        pg_owner_engine, user_id=user_id, doc_id=doc_id, doc_version_hash=doc_version_hash
+    )
+
+    monkeypatch.setattr(worker, "fetch_document", lambda *a, **k: b"bytes")
+    monkeypatch.setattr(worker, "run_analysis", lambda *a, **k: [])
+    _stub_llm_client(monkeypatch)
+
+    job = _make_job(pg_owner_engine, user_id=user_id, doc_id=doc_id, doc_version_hash=doc_version_hash)
+    worker._execute_analysis(job)
+
+    assert _cost_rows(pg_app_engine, user_id) == []
