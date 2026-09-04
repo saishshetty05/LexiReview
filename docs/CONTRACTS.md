@@ -796,8 +796,158 @@ column, the reason it was added).
 - Admin endpoints touch user metadata only — document text, quotes, and
   findings never enter this path.
 
+## 11. Per-user quotas + cost logging (PRD FR-16) (v1.15 — PROPOSED, not yet locked)
+
+FR-16 (PRD): "Per-user monthly analysis quota (configurable) with clear
+in-UI feedback; per-analysis token and cost logging for operational
+visibility." Two halves, straddling both lanes: quota enforcement sits in
+`POST /documents/upload` (Person A's endpoint), cost logging sits in
+`LLMClient`/`analysis_pipeline.py` (Person B's lane). Drafted as one section
+since both read the same new table; PROPOSED here for joint review before
+either half is built, same play as §9/outbox (v1.13) before it. Needs both
+devs' sign-off before this heading loses "PROPOSED."
+
+### Quota enforcement
+
+PROPOSED — scope is a single global monthly cap, not per-user. New env var
+`ANALYSIS_QUOTA_MONTHLY` (int, default TBD), read once via
+`LLMConfig`-style `from_env()`. A per-user override (naturally surfaced via
+`/admin/users`, §10) is real future work but is explicitly OUT of this
+version — folding it in now would pull §10 into this PR and blow the <400
+line convention. Noting it here so it isn't silently forgotten.
+
+PROPOSED — enforced in `upload_document` (`app/main.py`), checked
+**after preflight passes, before any of the documents/analysis_jobs/outbox
+rows are written** — same "rejection writes nothing" property preflight
+itself established (CLAUDE.md rule 8), not bolted on after the insert with
+a compensating delete.
+
+PROPOSED — count definition (revised during review — see DECISION_LOG.md
+2026-09-04): `COUNT(DISTINCT job_id)` over the caller's rows in
+`analysis_costs` (below) created since the start of the current UTC
+calendar month — i.e. the number of distinct jobs that made at least one
+real LLM provider call this month, not a state read off `analysis_jobs`.
+
+An earlier draft of this proposal counted `analysis_jobs` rows in state
+`running`/`succeeded`/`failed`, reasoning that excluding `queued` alone
+protects the user from system-side failures (a dead-lettered outbox row
+never leaves `queued`). Review caught the gap: `failed` is not equivalent
+to "an LLM call happened" — a job can reach `failed` from an extraction or
+storage error, or a guardrail refusal in `_resolve_api_key`, before
+`analyze()` is ever called, consuming zero real spend. Counting `failed`
+unconditionally forgave one class of system-side failure (broker/dead-
+letter) while still charging another (pre-LLM pipeline failure), which
+contradicted the section's own stated principle. Deriving the count from
+`analysis_costs` instead — write one row per provider call that actually
+happens (below) — collapses both cases under one rule: *you're charged for
+what actually called the LLM, nothing else*. A job that never reaches a
+provider call, for any reason, writes zero cost rows and doesn't count. A
+job that does call the LLM counts once regardless of what happens to the
+job afterward (job-level failure post-call still burned real spend).
+
+Accepted tradeoff: this couples the quota check (`upload_document`, Person
+A's lane) to `analysis_costs` (written by the worker, Person B's lane).
+Both proposals already need the same new table, so the coupling is one
+shared table, not new cross-lane surface. It also removes the prior
+proposal's `queued`-window race (a user firing uploads faster than worker
+pickup could observe them) — counting realized spend rather than job
+submissions means there's nothing to race against.
+
+PROPOSED — a re-upload (rule 9: new version row, immutable) counts like any
+other upload. It creates a new `analysis_jobs` row and runs a full
+analysis, so it consumes real quota-worthy cost regardless of whether the
+bytes are identical to a prior version. (Exact-duplicate re-upload is
+already blocked earlier, by FR-6's `409 duplicate_document` — this only
+concerns genuinely new versions.)
+
+PROPOSED — rejection response: `429` (semantically correct for a rate/quota
+limit, distinct from `403 account_suspended`'s policy-denial precedent),
+category `quota_exceeded`:
+```json
+{"category": "quota_exceeded", "message": "...", "limit": 100, "used": 100,
+ "resets_at": "2026-10-01T00:00:00+00:00"}
+```
+`resets_at` is always the first of next UTC month at 00:00 — lets the
+frontend show "resets in N days" without its own month-math. Frontend
+`CATEGORY_MESSAGES` needs a new `quota_exceeded` entry (the exact gap #70's
+review caught for MFA) and the upload UI needs to surface it as a clear,
+non-alarming state, not a generic error toast (FR-16's "clear in-UI
+feedback" clause).
+
+### Cost logging
+
+PROPOSED — new table `analysis_costs`, one row per LLM provider call (not
+per job — a job can generate up to three: `analyze`, `summarize`,
+`check_entailment` x N eligible findings, per §2/§2c/§2 AI-6):
+
+| column | type | notes |
+|---|---|---|
+| id | uuid pk | |
+| job_id | uuid, FK analysis_jobs | not null |
+| user_id | uuid, FK users | not null; RLS `self_only`, same pattern as `documents`/`analysis_jobs` |
+| call_type | text | `analyze` \| `summarize` \| `entailment` |
+| model | text | the pinned model string actually used (CLAUDE.md rule 3), not read from env at query time |
+| input_tokens | int | from the provider response's usage block |
+| output_tokens | int | from the provider response's usage block |
+| created_at | timestamptz | default now() |
+
+PROPOSED — **tokens are stored, currency is not.** Cost is computed at read
+time from `(model, input_tokens, output_tokens)` against a rate table kept
+in code/config, not frozen into the row — a frozen computed cost would bake
+in whatever rate was live at write time and couldn't be recomputed if rates
+change later.
+
+PROPOSED — written by the **worker**, inside the same `app_user_session(uid)`
+block that already exists around each provider call in
+`analysis_pipeline.py` (mirrors the `_execute_summary`/entailment
+"annotate, never fail the job" pattern — a cost-log write failure must not
+fail the job). Each of `LLMClient.analyze()`/`summarize()`/
+`check_entailment()` needs to surface the provider response's usage block
+back to its caller (currently discarded) — exact call-site mechanics are an
+implementation detail for the code PR, not locked here.
+
+PROPOSED — no `relay` role grant needed: only the `app_user`-scoped worker
+connection writes this table, same as `analysis_jobs`/`decisions`. Confirm
+this holds at implementation time rather than assuming it.
+
+DECIDED (not proposed — this one isn't a design choice, it's rule 2 stated
+explicitly so it can't drift back in later): `analysis_costs` is metadata
+only — tokens, model string, `job_id`, timestamps. Prompt text, completion
+text, or anything document-derived MUST NOT be written to this table, even
+transiently for debugging.
+
+### Open questions for review (not yet decided)
+
+- Exact value of `ANALYSIS_QUOTA_MONTHLY`'s default — a product/cost call,
+  not an engineering one.
+- Whether `analysis_costs` needs an index beyond `(user_id, created_at)`
+  once there's a use for querying it (no read endpoint is proposed in this
+  version — "operational visibility" is satisfied by the table existing and
+  being queryable directly, not by a new API surface. A `GET
+  /admin/costs`-style endpoint is real future work, not in scope here).
+- Split of implementation PRs: quota enforcement (migration + `main.py`
+  change) is Person A's lane by precedent (§5's `upload_document` is A's);
+  cost logging (migration + `llm_client.py`/`analysis_pipeline.py` change)
+  is Person B's. Both need the same migration (one new table), so either
+  one migration PR shared by both proposed changes, or two migrations —
+  to be settled in review, not decided unilaterally here.
+
 ## Change log
 
+- v1.15 (2026-09-04): added §11 (PROPOSED, not locked) — PRD FR-16, per-user
+  monthly analysis quota + per-call token/cost logging. Global env-configured
+  quota (per-user override deferred), enforced pre-write in `upload_document`
+  like preflight; new `analysis_costs` table (metadata only, rule 2), written
+  by the worker per provider call. Straddles both lanes — quota is Person A's
+  `upload_document`, cost logging is Person B's `llm_client.py`/
+  `analysis_pipeline.py`. Count definition revised same-day during review:
+  `COUNT(DISTINCT job_id)` over `analysis_costs` rows, not `analysis_jobs`
+  state — closes an inconsistency where a pre-LLM-call job failure (e.g.
+  extraction error) was charged while a dead-lettered broker failure was
+  forgiven, despite both being system-side. Open questions (quota default
+  value, migration split) flagged in the section itself, not decided here.
+  Needs both devs' sign-off before this loses PROPOSED status, same play as
+  §9/§1 (v1.13) before it.
 - v1 (2026-07-13): initial locked version. All DECIDED items chosen from the
   defaults proposed in PROJECT_STATUS.md §6; example finding written for the fake
   lease rent-inconsistency case (BLOCK_4 vs BLOCK_19).
