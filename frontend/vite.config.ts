@@ -25,6 +25,7 @@ export default defineConfig({
       '/auth': 'http://localhost:8000',
       '/documents': 'http://localhost:8000',
       '/jobs': 'http://localhost:8000',
+      '/admin': 'http://localhost:8000',
     },
   },
 })
