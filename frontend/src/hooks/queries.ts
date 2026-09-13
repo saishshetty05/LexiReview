@@ -31,8 +31,18 @@ import {
 } from "@/lib/api";
 
 export function useLoginMutation() {
+  const queryClient = useQueryClient();
   return useMutation({
     mutationFn: ({ email, password }: { email: string; password: string }) => login(email, password),
+    // A login in the same tab can switch which user is authenticated (e.g.
+    // signing up a second account without a full page reload) -- every
+    // cached query (current-user, admin-users, documents, ...) is scoped to
+    // whoever was previously logged in, so it must all be thrown away here
+    // rather than left to expire on its own staleTime. Without this, the UI
+    // can show the previous user's identity/permissions for up to a minute.
+    onSuccess: () => {
+      queryClient.clear();
+    },
   });
 }
 
@@ -192,7 +202,15 @@ export function useMFADisableMutation() {
 }
 
 export function useMFAChallengeMutation() {
-  return useMutation({ mutationFn: mfaChallenge });
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: mfaChallenge,
+    // Completes login for MFA-enabled accounts (sets the real session
+    // cookie) -- same identity-switch reasoning as useLoginMutation above.
+    onSuccess: () => {
+      queryClient.clear();
+    },
+  });
 }
 
 export function useMFAStatusQuery() {
