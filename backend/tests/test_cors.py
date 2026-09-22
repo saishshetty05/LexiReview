@@ -45,7 +45,10 @@ def test_default_is_just_the_vite_dev_origin(monkeypatch):
 
 
 def test_cors_origins_env_var_is_comma_split(monkeypatch):
-    monkeypatch.setenv("CORS_ORIGINS", "https://a.example,https://b.example")
+    """Space after the comma is the natural way a person writes this list
+    -- must not survive into the origin string, or it can never match a
+    real Origin header again (looks configured, silently rejects everything)."""
+    monkeypatch.setenv("CORS_ORIGINS", "https://a.example, https://b.example")
     assert cors_allow_origins() == ["https://a.example", "https://b.example"]
 
 

@@ -73,8 +73,8 @@ def cors_allow_origins() -> list[str]:
     could then read back an authenticated response. An explicit allowlist
     closes that gap; SameSite=Strict remains a second, not the only, layer.
     """
-    raw = os.environ.get("CORS_ORIGINS", "").strip()
-    origins = [o for o in raw.split(",") if o]
+    raw = os.environ.get("CORS_ORIGINS", "")
+    origins = [o.strip() for o in raw.split(",") if o.strip()]
     return origins or ["http://localhost:5173"]
 
 
