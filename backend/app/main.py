@@ -12,6 +12,7 @@ import uuid
 from typing import Iterator, Literal
 
 from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
@@ -53,6 +54,37 @@ from app.storage import (
 )
 
 app = FastAPI(title="LexiReview API")
+
+
+def cors_allow_origins() -> list[str]:
+    """Comma-separated CORS_ORIGINS env var; defaults to just the Vite dev
+    origin. Same "configure per deployment, don't hardcode" pattern as
+    LLM_MODEL/ANALYSIS_QUOTA_MONTHLY. A pure function (not inlined into
+    add_middleware below) so tests can exercise the parsing directly,
+    and build an isolated test app with a chosen origin list, without
+    reloading this module (which every other test file also imports).
+
+    Deliberately NOT allow_origins=["*"]: that was tried and rejected here
+    (see docs/DECISION_LOG.md, 2026-09-22). SameSite=Strict on the auth
+    cookie (below) blocks cross-SITE requests, but "site" is the registrable
+    domain, not the origin -- another port/subdomain/scheme on localhost (or
+    on the real deployment's domain) is still same-site, so the cookie IS
+    attached there. Combined with a wildcard allow_origins, that origin's JS
+    could then read back an authenticated response. An explicit allowlist
+    closes that gap; SameSite=Strict remains a second, not the only, layer.
+    """
+    raw = os.environ.get("CORS_ORIGINS", "")
+    origins = [o.strip() for o in raw.split(",") if o.strip()]
+    return origins or ["http://localhost:5173"]
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=cors_allow_origins(),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 ACCESS_TOKEN_COOKIE = "access_token"  # nosec B105 -- cookie name, not a credential
 REFRESH_TOKEN_COOKIE = "refresh_token"  # nosec B105 -- cookie name, not a credential
