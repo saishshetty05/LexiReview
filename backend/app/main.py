@@ -55,20 +55,32 @@ from app.storage import (
 
 app = FastAPI(title="LexiReview API")
 
-# Accept requests from any origin, not just the dev-server's own proxied
-# origin. allow_credentials=True is required for the auth cookie to ride
-# along on a cross-origin fetch at all; Starlette's CORSMiddleware handles
-# the "*" + credentials combination browsers otherwise reject by checking
-# each actual request: no Cookie header -> literal "*" (fine, nothing
-# credentialed to protect); a Cookie header present -> the specific
-# request Origin is reflected back instead (spec-required once credentials
-# are in play). That cookie is SameSite=Strict (below), so the browser
-# never attaches it on a cross-origin request in the first place -- this
-# widens which origins can see responses from unauthenticated routes, not
-# which origins can ride an authenticated session.
+
+def cors_allow_origins() -> list[str]:
+    """Comma-separated CORS_ORIGINS env var; defaults to just the Vite dev
+    origin. Same "configure per deployment, don't hardcode" pattern as
+    LLM_MODEL/ANALYSIS_QUOTA_MONTHLY. A pure function (not inlined into
+    add_middleware below) so tests can exercise the parsing directly,
+    and build an isolated test app with a chosen origin list, without
+    reloading this module (which every other test file also imports).
+
+    Deliberately NOT allow_origins=["*"]: that was tried and rejected here
+    (see docs/DECISION_LOG.md, 2026-09-22). SameSite=Strict on the auth
+    cookie (below) blocks cross-SITE requests, but "site" is the registrable
+    domain, not the origin -- another port/subdomain/scheme on localhost (or
+    on the real deployment's domain) is still same-site, so the cookie IS
+    attached there. Combined with a wildcard allow_origins, that origin's JS
+    could then read back an authenticated response. An explicit allowlist
+    closes that gap; SameSite=Strict remains a second, not the only, layer.
+    """
+    raw = os.environ.get("CORS_ORIGINS", "").strip()
+    origins = [o for o in raw.split(",") if o]
+    return origins or ["http://localhost:5173"]
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=cors_allow_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
