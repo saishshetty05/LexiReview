@@ -6,6 +6,52 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { AppShell } from "@/components/layout/AppShell";
 import { useDocumentsQuery } from "@/hooks/queries";
 import { isAuthError } from "@/hooks/useAuth";
+import type { DocumentListItem } from "@/lib/api";
+import type { Severity } from "@/types/finding";
+
+// CLAUDE.md rule 7: the UI never says a document is "safe" -- this is the
+// one allowed phrase, matching llm_client.py's REQUIRED_NO_ISSUES_PHRASE
+// (also reused verbatim for an empty risk_snapshot in analysis_pipeline.py).
+const NO_ISSUES_PHRASE = "no issues detected by automated review";
+
+const SEVERITY_ORDER: Severity[] = ["high", "medium", "low", "info"];
+
+const SEVERITY_BADGE_CLASSES: Record<Severity, string> = {
+  high: "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400",
+  medium: "bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-400",
+  low: "bg-yellow-100 text-yellow-800 dark:bg-yellow-900/30 dark:text-yellow-400",
+  info: "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400",
+};
+
+function SeverityCountBadges({ counts }: { counts: NonNullable<DocumentListItem["finding_counts"]> }) {
+  const totalFindings = SEVERITY_ORDER.reduce(
+    (sum, severity) => sum + counts[severity].verified + counts[severity].unverified,
+    0
+  );
+
+  if (totalFindings === 0) {
+    return <p className="text-xs text-green-600 dark:text-green-400">{NO_ISSUES_PHRASE}</p>;
+  }
+
+  return (
+    <div className="flex flex-wrap gap-1.5">
+      {SEVERITY_ORDER.map((severity) => {
+        const { verified, unverified } = counts[severity];
+        const total = verified + unverified;
+        if (total === 0) return null;
+        return (
+          <span
+            key={severity}
+            className={`rounded-full px-2 py-0.5 text-xs font-medium ${SEVERITY_BADGE_CLASSES[severity]}`}
+          >
+            {total} {severity[0].toUpperCase() + severity.slice(1)}
+            {unverified > 0 && ` (${unverified} unverified)`}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -132,10 +178,8 @@ export function DashboardPage() {
                   {doc.latest_job?.state === "failed" && (
                     <p className="text-xs text-destructive">Analysis failed</p>
                   )}
-                  {doc.latest_job?.state === "succeeded" && (
-                    <p className="text-xs text-green-600 dark:text-green-400">
-                      Analysis complete
-                    </p>
+                  {doc.latest_job?.state === "succeeded" && doc.finding_counts && (
+                    <SeverityCountBadges counts={doc.finding_counts} />
                   )}
                 </CardContent>
               </Card>

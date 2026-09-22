@@ -13,7 +13,7 @@ from typing import Iterator, Literal
 
 from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
 from pydantic import BaseModel
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -745,10 +745,27 @@ def list_documents(
           "state": "succeeded" | "failed" | "queued" | "running",
           "created_at": "...",
           "finished_at": "..." | null
+        } | null,
+        "finding_counts": {
+          "high": {"verified": 2, "unverified": 1},
+          "medium": {"verified": 0, "unverified": 0},
+          "low": {"verified": 0, "unverified": 0},
+          "info": {"verified": 0, "unverified": 0}
         } | null
       },
       ...
     ]
+
+    `finding_counts` is null unless `latest_job.state == "succeeded"` -- this
+    keeps "not analyzed yet" / "still running" / "failed" distinguishable from
+    "analyzed, zero findings" (all-zero counts). Counts are the AI's raw
+    output, grouped by (severity, verification) straight off `analysis_results`
+    -- NOT `document_summaries.risk_snapshot`, which has no verified/unverified
+    split and can be absent on a succeeded job (summary generation is
+    best-effort, see `analysis_jobs.summary_error`). They do NOT reflect
+    `decisions.severity_override` -- a reviewer's per-finding override can
+    make this count diverge from what the review page shows for that finding;
+    see docs/DECISION_LOG.md (2026-09-22).
     """
     _user, session = current
     # RLS scopes this query automatically via app_user_session
@@ -774,6 +791,7 @@ def list_documents(
         latest_job = session.execute(latest_job_stmt).scalar_one_or_none()
 
         job_info = None
+        finding_counts = None
         if latest_job is not None:
             job_info = {
                 "job_id": str(latest_job.id),
@@ -781,6 +799,23 @@ def list_documents(
                 "created_at": latest_job.created_at.isoformat(),
                 "finished_at": latest_job.finished_at.isoformat() if latest_job.finished_at else None,
             }
+            if latest_job.state == "succeeded":
+                finding_counts = {
+                    severity: {"verified": 0, "unverified": 0}
+                    for severity in ("high", "medium", "low", "info")
+                }
+                counts_stmt = (
+                    select(
+                        AnalysisResult.severity,
+                        AnalysisResult.verification,
+                        func.count(),
+                    )
+                    .where(AnalysisResult.job_id == latest_job.id)
+                    .group_by(AnalysisResult.severity, AnalysisResult.verification)
+                )
+                for severity, verification, count in session.execute(counts_stmt).all():
+                    if severity in finding_counts and verification in ("verified", "unverified"):
+                        finding_counts[severity][verification] = count
 
         result.append({
             "doc_id": str(doc.doc_id),
@@ -790,6 +825,7 @@ def list_documents(
             "size_bytes": doc.size_bytes,
             "created_at": doc.created_at.isoformat(),
             "latest_job": job_info,
+            "finding_counts": finding_counts,
         })
 
     return result
