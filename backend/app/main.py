@@ -12,6 +12,7 @@ import uuid
 from typing import Iterator, Literal
 
 from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
@@ -53,6 +54,25 @@ from app.storage import (
 )
 
 app = FastAPI(title="LexiReview API")
+
+# Accept requests from any origin, not just the dev-server's own proxied
+# origin. allow_credentials=True is required for the auth cookie to ride
+# along on a cross-origin fetch at all; Starlette's CORSMiddleware handles
+# the "*" + credentials combination browsers otherwise reject by checking
+# each actual request: no Cookie header -> literal "*" (fine, nothing
+# credentialed to protect); a Cookie header present -> the specific
+# request Origin is reflected back instead (spec-required once credentials
+# are in play). That cookie is SameSite=Strict (below), so the browser
+# never attaches it on a cross-origin request in the first place -- this
+# widens which origins can see responses from unauthenticated routes, not
+# which origins can ride an authenticated session.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 ACCESS_TOKEN_COOKIE = "access_token"  # nosec B105 -- cookie name, not a credential
 REFRESH_TOKEN_COOKIE = "refresh_token"  # nosec B105 -- cookie name, not a credential
