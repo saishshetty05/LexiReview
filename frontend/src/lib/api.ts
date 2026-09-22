@@ -19,6 +19,13 @@ export interface DocumentListItem {
     created_at: string;
     finished_at: string | null;
   } | null;
+  /**
+   * Per-severity finding counts, split by verification. `null` unless
+   * `latest_job.state === "succeeded"` -- stays distinguishable from
+   * "analyzed, zero findings" (all-zero counts). Reflects the AI's raw
+   * output, not any reviewer severity_override (CONTRACTS.md §7a).
+   */
+  finding_counts: Record<Severity, { verified: number; unverified: number }> | null;
 }
 
 export class ApiError extends Error {
