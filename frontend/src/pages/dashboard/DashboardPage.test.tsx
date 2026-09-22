@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { describe, expect, it, vi } from "vitest";
 
@@ -73,10 +73,11 @@ describe("DashboardPage severity-count badges", () => {
     ]);
     renderPage();
 
-    expect(await screen.findByText(/3 High \(1 unverified\)/)).toBeInTheDocument();
-    expect(screen.getByText(/1 Medium \(1 unverified\)/)).toBeInTheDocument();
-    expect(screen.getByText(/1 Info/)).toBeInTheDocument();
-    expect(screen.queryByText(/Low/)).not.toBeInTheDocument();
+    const badges = await screen.findByTestId("severity-count-badges");
+    expect(within(badges).getByText(/3 High \(1 unverified\)/)).toBeInTheDocument();
+    expect(within(badges).getByText(/1 Medium \(1 unverified\)/)).toBeInTheDocument();
+    expect(within(badges).getByText(/1 Info/)).toBeInTheDocument();
+    expect(within(badges).queryByText(/Low/)).not.toBeInTheDocument();
   });
 
   it("renders the required rule-7 phrase, never a checkmark, when all counts are zero", async () => {
@@ -108,6 +109,6 @@ describe("DashboardPage severity-count badges", () => {
 
     await screen.findByText("Analysis in progress...");
     expect(screen.queryByText("no issues detected by automated review")).not.toBeInTheDocument();
-    expect(screen.queryByText(/High|Medium|Low|Info/)).not.toBeInTheDocument();
+    expect(screen.queryByTestId("severity-count-badges")).not.toBeInTheDocument();
   });
 });

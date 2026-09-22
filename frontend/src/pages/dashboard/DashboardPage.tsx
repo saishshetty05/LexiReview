@@ -34,7 +34,7 @@ function SeverityCountBadges({ counts }: { counts: NonNullable<DocumentListItem[
   }
 
   return (
-    <div className="flex flex-wrap gap-1.5">
+    <div className="flex flex-wrap gap-1.5" data-testid="severity-count-badges">
       {SEVERITY_ORDER.map((severity) => {
         const { verified, unverified } = counts[severity];
         const total = verified + unverified;
